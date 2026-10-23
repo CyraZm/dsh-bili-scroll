@@ -630,9 +630,6 @@ function reportMeta() {
         dmMode: cfg.dmMode,
         dmUid: Number(cfg.dmUid) || 0,
         transcribe: cfg.transcribe,
-        // ⭐ 2.0.4：认人改成"只认显式 UID / 登录账号自己"之后，**用小号登录、大号聊天**的人会静默失去私信回复 ✗
-      //    ⇒ 这里只给一条**提示**（不自动改！），界面上让他一键确认 —— 自动把"私信对象"当主人等于把安全修复撤销 ✗
-      ownerInfo: ownerInfo(),
       loggedIn: hasCredential(),
         home: stateDir,
         report: join(outDir, `${dayKey(now)}.md`),
@@ -2087,6 +2084,8 @@ function reportMeta() {
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
+      // ⭐ 2.0.4：界面上"它会认谁当主人"那行用这个（用小号登录、大号聊天的会看错）
+      ownerInfo: ownerInfo(),
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),
       version: myVersion(),
