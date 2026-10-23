@@ -687,6 +687,11 @@ function WatchTab() {
             placeholder: '想让它怎么说话就写在这儿 —— 比如「叫我某某，说话简短点，别用 emoji」。也可以直接填一个文件路径（如 D:\\deepseek\\AGENTS.md，或它所在的那个目录），每次运行都会重新读那个文件。留空 = 按中性说话（不扮演任何人）。',
             value: persona ?? '', onChange: (e) => setPersona(e.target.value),
           }),
+          // ⭐ 2.0.5（issue #89）：把人设字数亮出来 —— 超 40000 只送前 40000、超 60000 保存就截，得让用户自己看得见
+          h('div', { 'data-bd-note': '' },
+            '字数：' + String(persona ?? '').length
+            + (String(persona ?? '').length > 40000 ? '（⚠️ 超过 40000，超出的部分不会生效）' : '')
+            + (String(persona ?? '').length > 60000 ? '（⚠️ 超过 60000，保存时会被截断）' : '')),
           h('div', { 'data-bd-note': '' },
             (st.personaFromWs && String(persona || '').trim() === '')
               ? '你现在还是用「工作区」里那份 AGENTS.md 说话的（照旧生效）。想把它搬到这儿改，就把上面的路径填成本机那个目录。'

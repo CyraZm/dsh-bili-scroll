@@ -269,7 +269,15 @@ function reportMeta() {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
-    if ('personaPrompt' in p) p.personaPrompt = String(p.personaPrompt || '').slice(0, 8000)
+    // ⭐ 2.0.5（issue #89）：人设上限 8000 → 60000；**截断时要出声**（以前静默砍，用户以为写进去了 ✗）
+    if ('personaPrompt' in p) {
+      const raw = String(p.personaPrompt || '')
+      const LIMIT = 60000
+      if (raw.length > LIMIT) {
+        log('⚠️ 人设提示词 ' + raw.length + ' 字符，超过保存上限 ' + LIMIT + ' ⇒ 只存前 ' + LIMIT + '（截掉 ' + (raw.length - LIMIT) + ' 字）')
+        p.personaPrompt = raw.slice(0, LIMIT)
+      } else p.personaPrompt = raw
+    }
     if ('dmWatch' in p) p.dmWatch = Boolean(p.dmWatch)
     if ('dmWatchMinutes' in p) p.dmWatchMinutes = Math.max(1, Math.min(120, Number(p.dmWatchMinutes) || 1))
     if ('dmReplyPerDay' in p) p.dmReplyPerDay = Math.max(0, Math.min(20, Number(p.dmReplyPerDay) || 0))
@@ -990,16 +998,28 @@ function reportMeta() {
       }
     }
     if (persona) {
+      // ⭐ 2.0.5（issue #89）：6000 → 40000；超了要写一行日志，别让用户以为"规则生效了" ✗
+      const PERSONA_LIMIT = 40000
+      const personaText = (() => {
+        const raw = String(persona)
+        if (raw.length > PERSONA_LIMIT) {
+          log('⚠️ 人设提示词 ' + raw.length + ' 字符，超过上限 ' + PERSONA_LIMIT + ' ⇒ 只送前 ' + PERSONA_LIMIT + '（截掉 ' + (raw.length - PERSONA_LIMIT) + ' 字）')
+          return raw.slice(0, PERSONA_LIMIT)
+        }
+        return raw
+      })()
       ownerDoc = '\n\n===== 使用者的人设' + (personaFromFile ? '（读自 ' + personaFromFile + '）' : '提示词') + '（**按这个来**）=====\n'
-        + persona.slice(0, 6000)
+        + personaText
         + '\n===== 人设结束 =====\n'
     }
       const wsDir = String(cfg.workspace || '').trim()
       const agents = (!persona && wsDir) ? join(wsDir, 'AGENTS.md') : ''
       if (agents && existsSync(agents)) {
         const text = readFileSync(agents, 'utf8')
+        const AG_LIMIT = 40000
+        if (text.length > AG_LIMIT) log('⚠️ 工作区的 AGENTS.md ' + text.length + ' 字符，超过上限 ' + AG_LIMIT + ' ⇒ 只送前 ' + AG_LIMIT + '（截掉 ' + (text.length - AG_LIMIT) + ' 字）')
         ownerDoc = '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
-          + text.slice(0, 6000)
+          + text.slice(0, AG_LIMIT)
           + '\n===== 设定结束 =====\n'
       }
     } catch { /* 读不到就算了，别因此跑不成 */ }
@@ -2515,32 +2535,61 @@ function reportMeta() {
     return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${path}` })
   }
 
-  try {
   const sameOriginOk = (req) => {
     try {
       const host = String(req.headers.host || '')
       if (!host) return true   // 没有 Host 头 = 不是浏览器/不是外来的 HTTP 请求
       if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)) return false
       const pick = String(req.headers.origin || req.headers.referer || '')
-      if (!pick) return true   // 不是浏览器发的（本机脚本/宿主内部）—— 本机进程本来就有权限
+      if (!pick) return true   // 不是浏览器发的（本机脚本/宿主内部）
       try {
         const u = new URL(pick)
         return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)
       } catch { return false }
     } catch { return false }
   }
+
+  // ⭐⭐ 2.0.5（issue #88）：**走 DSH 自己的信任栅栏** —— 隧道把 Host 改写成回环时，
+  //    我们那层"本机同源"会被绕过；connection.requestRejection 才是真正的鉴权（认 cookie/token）✓
+  //    取法照 DSH 内部写法：Reflect.get(ctx, "connection") ⇒ requestRejection(req)
+  //    返回 undefined = 放行；返回数字 = 回这个状态码（通常 401）
+  //    ⚠️ 栅栏不可用时不静默放行：仍要求过"本机同源"，两道都不成 ⇒ 拒 ✓
+  let fenceWarned = false
+  const fenceReject = (req, res) => {
+    let conn = null
+    try { conn = Reflect.get(ctx, "connection") } catch { conn = null }
+    if (!conn || typeof conn.requestRejection !== "function") {
+      if (!fenceWarned) { fenceWarned = true; log("⚠️ 拿不到 DSH 信任栅栏（connection.requestRejection）⇒ 退回本机同源这一道") }
+      return false
+    }
+    try {
+      const rejection = conn.requestRejection(req)
+      if (rejection === undefined) return false
+      res.statusCode = typeof rejection === "number" ? rejection : 403
+      try { res.end() } catch { /* 忽略 */ }
+      return true
+    } catch (err) {
+      log("信任栅栏调用出错，按不通过处理：" + String(err?.message ?? err))
+      res.statusCode = 403
+      try { res.end() } catch { /* 忽略 */ }
+      return true
+    }
+  }
+
+  try {
     ctx.effect(() => ctx.webServer.register({
       kind: 'prefix',
       path: '/api/bili-duty',
-  // ⭐ 2026-10-23 安全加固（审计点名"未鉴权的控制接口"）：**只接受本机同源请求** ——
-  //    别的网页在你浏览器里也能打到 127.0.0.1，所以要比对 Host 与本机、Origin/Referer 与同源 ✓
       handler: async (req, res) => {
-    if (!sameOriginOk(req)) {
-      try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求' }) } catch { /* 忽略 */ }
-      return
-    }
-        try { await handle(req, res, new URL(req.url, 'http://127.0.0.1')) } catch (e) {
-          sendJson(res, 500, { ok: false, error: e?.message ?? String(e) })
+        // ① 先过 DSH 的信任栅栏（真鉴权）
+        if (fenceReject(req, res)) return
+        // ② 再过本机同源（栅栏拿不到时的兜底，也挡浏览器里别的网页）
+        if (!sameOriginOk(req)) {
+          try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求' }) } catch { /* 忽略 */ }
+          return
+        }
+        try { await handle(req, res, new URL(req.url, 'http://127.0.0.1')) } catch (err) {
+          sendJson(res, 500, { ok: false, error: err?.message ?? String(err) })
         }
       },
     }), 'bili-duty: /api/bili-duty 路由')
