@@ -36,6 +36,8 @@ import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from
 import { ensureUv } from './lib/uvfetch.mjs'
 
 export const name = 'bili-scroll'
+// attachments / llm 故意**不**列进 inject：它们只在看图时才用 ctx.get 取，
+// 取不到就把图降级成文字说明；列进来会让没有这两个服务的宿主直接装不上。
 export const inject = ['webServer', 'tools', 'settings']
 
 /**
@@ -495,6 +497,12 @@ function reportMeta() {
     return client.call(toolName, args, opts)
   }
 
+  /** 同 call，但保留 MCP 返回里的图片块（封面/画面要用）—— 见 lib/mcp.mjs 的 callRaw */
+  const callRaw = async (toolName, args, opts) => {
+    const client = await ensureMcp()
+    return client.callRaw(toolName, args, opts)
+  }
+
   const hasCredential = () => existsSync(join(stateDir, 'bili_credential.json'))
 
   /* ─────────────── 工具 ─────────────── */
@@ -518,7 +526,7 @@ function reportMeta() {
 
   const tool = (spec) => ctx.tools.register(defineTool({
     ...spec,
-    output: textOutput,
+    output: spec.output || textOutput,
     async execute(args, exec) { return safe(await spec.execute(args, exec)) },
   }))
 
@@ -570,6 +578,109 @@ function reportMeta() {
     },
     async execute(args) {
       return call('bili_comments', { bvid: String(args.bvid ?? ''), num: Math.max(1, Number(args.num) || 30) })
+    },
+  })
+
+  /* ─────────────── 看画面：把图交给模型 ───────────────
+   * 图片在工具结果里是附件引用 { type:'image', attachment }，不是 image_url；
+   * 字节先存进 ctx.get('attachments')，由 render 拼进返回内容。
+   * 模型不支持图片输入时退化成文字（查 llm.resolveModelInfo 的 inputModalities）。
+   */
+  const imageOutput = {
+    schema: { type: 'object', properties: {}, additionalProperties: true },
+    render: (_args, value) => {
+      const src = value && typeof value === 'object' ? value : { value }
+      const { image, images, ...rest } = src
+      const parts = [{ type: 'text', text: JSON.stringify(rest, null, 2) }]
+      const refs = [...(image ? [image] : []), ...(Array.isArray(images) ? images : [])]
+      for (const ref of refs) parts.push({ type: 'image', attachment: ref })
+      return parts
+    },
+  }
+
+  /** 把 MCP 回来的图存成附件引用，返回 { ok, refs } 或 { ok:false, reason, hint } */
+  const attachImages = async (exec, images) => {
+    const attachments = ctx.get('attachments')
+    if (!attachments?.saveImages) {
+      return { ok: false, reason: 'attachments', hint: '宿主的图片服务不可用（ctx.get("attachments") 是空的）' }
+    }
+
+    const llm = ctx.get('llm')
+    const routed = exec?.agent?.session?.requestHeader?.()?.config
+    const provider = routed?.provider ?? exec?.agent?.options?.provider
+    const model = routed?.model ?? exec?.agent?.options?.model
+    if (!llm?.resolveModelInfo) {
+      return { ok: false, reason: 'model_probe', hint: `查不到模型能力（provider=${provider} model=${model}）` }
+    }
+    let modalities
+    try {
+      modalities = (await llm.resolveModelInfo(provider, model, exec?.signal))?.inputModalities
+    } catch (e) {
+      return { ok: false, reason: 'model_probe', hint: `查模型能力失败（${provider}/${model}）：${String(e?.message ?? e)}` }
+    }
+    if (!Array.isArray(modalities)) {
+      return { ok: false, reason: 'model_probe', hint: `模型 ${provider}/${model} 没声明输入模态` }
+    }
+    if (!modalities.includes('image')) {
+      return { ok: false, reason: 'model_no_image', hint: `模型 ${provider}/${model} 不支持图片输入（${modalities.join(',') || '无'}）` }
+    }
+
+    try {
+      const refs = await attachments.saveImages(
+        images.map((i) => ({ data: Buffer.from(i.data, 'base64'), mediaType: i.mimeType })),
+      )
+      return { ok: true, refs }
+    } catch (e) {
+      return { ok: false, reason: 'save_failed', hint: '存图片失败：' + String(e?.message ?? e) }
+    }
+  }
+
+  tool({
+    name: 'bili_cover',
+    description: '看一个视频的封面（等比缩到 512px 宽）。最便宜的一档"看一眼"：'
+      + '能看出风格、标题美术、大致题材，但看不出视频里具体发生了什么。',
+    parameters: { bvid: { type: 'string', description: 'BV号' } },
+    output: imageOutput,
+    async execute(args, exec) {
+      const { json, images } = await callRaw('bili_cover', { bvid: String(args.bvid ?? '') }, { signal: exec?.signal })
+      const meta = json && typeof json === 'object' ? json : { raw: json }
+      if (!meta.ok) return meta
+      const img = images[0]
+      if (!img) return { ...meta, ok: false, error: 'MCP 没返回图片' }
+
+      const a = await attachImages(exec, [img])
+      return a.ok
+        ? { ...meta, image_attached: true, image: a.refs[0] }
+        : { ...meta, image_attached: false, image_skip_reason: a.reason, hint: a.hint }
+    },
+  })
+
+  tool({
+    name: 'bili_frames',
+    description: '看视频里的画面（从 B 站自带的故事板裁 1-6 帧，每帧 480×270）。\n'
+      + '想知道"这条视频到底拍了什么"就用它 —— 字幕告诉你说什么，画面告诉你拍的是什么。\n'
+      + '默认按时长均匀取 3 帧；想盯某个时刻（比如字幕里提到的那段）就传 at。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号' },
+      num: { type: 'number', description: '取几帧，1-6，默认 3' },
+      at: { type: 'array', items: { type: 'number' }, description: '指定时间点（秒）列表；传了就以它为准，忽略 num' },
+    },
+    output: imageOutput,
+    async execute(args, exec) {
+      const at = Array.isArray(args.at) ? args.at.map(Number).filter(Number.isFinite) : undefined
+      const { json, images } = await callRaw('bili_frames', {
+        bvid: String(args.bvid ?? ''),
+        num: Math.max(1, Math.min(Number(args.num) || 3, 6)),
+        ...(at && at.length ? { at } : {}),
+      }, { signal: exec?.signal })
+      const meta = json && typeof json === 'object' ? json : { raw: json }
+      if (!meta.ok) return meta
+      if (!images.length) return { ...meta, ok: false, error: 'MCP 没返回图片' }
+
+      const a = await attachImages(exec, images)
+      return a.ok
+        ? { ...meta, image_attached: true, images: a.refs }
+        : { ...meta, image_attached: false, image_skip_reason: a.reason, hint: a.hint }
     },
   })
 
@@ -1099,7 +1210,9 @@ function reportMeta() {
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
   const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+
+    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info',
+      'bili_cover', 'bili_frames']   // 看封面 / 画面帧：只读，不需要额外的闸
     // ⭐⭐ 2.0.4（第三方体检第 3 条）：**"只发私信"时评论通道必须硬关** —— 以前只看 autoComment，
     //    用户以前开过自动评论、后来切到"只私信"，那个 true 还在 config 里 ⇒ 评论工具照样下发 ✗
     const dmOnly = String(cfg.dmMode || '').trim() === 'only'

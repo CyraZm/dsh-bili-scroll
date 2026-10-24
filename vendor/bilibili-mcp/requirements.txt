@@ -6,3 +6,5 @@ aiohttp>=3.9.0
 mcp>=1.0.0,<2
 # 插件用 Python 画登录二维码；不装就只能退回"只给 URL"
 qrcode[pil]>=8.0
+# bili_frames 裁画面帧要 Pillow。qrcode[pil] 会带进来，但那是传递依赖 —— 显式钉住
+Pillow>=9.0
