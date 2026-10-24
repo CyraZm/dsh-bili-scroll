@@ -1182,7 +1182,11 @@ function reportMeta() {
       + (already > 0
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
-      + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      // ⭐ 2026-10-24：留空不再用内置关键词（那会让所有用户刷同一批视频、评论区扎堆）
+      //    ⇒ 留空 = 用 `bili_recommend` 刷**这个账号的首页推荐流**，按各自画像天然散开 ✓
+      + (kws.length
+        ? `关键词用这些：${kws.join('、')}（用 bili_search 搜）。`
+        : '没填关键词 ⇒ **这一轮用 bili_recommend 刷首页推荐流**（不要用 bili_search 搜固定词）。')
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
@@ -1244,7 +1248,7 @@ function reportMeta() {
    */
   const mcpWhitelist = () => {
     const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info',
-      'bili_cover', 'bili_frames', 'bili_danmaku']  // 看封面 / 画面帧 / 弹幕：只读，不需要额外的闸
+      'bili_cover', 'bili_frames', 'bili_danmaku', 'bili_recommend']  // 看封面 / 画面帧 / 弹幕：只读，不需要额外的闸
     // ⭐⭐ 2.0.5（issue #96 安全加固）：值班轮改成最小权限 profile（没有 fs / shell / web）⇒
     //    写日报 / 判重表 / 归档、以及无字幕转写，全走这几只**固定路径的窄口工具** ✓
     list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_digest_append', 'duty_seen_recent')

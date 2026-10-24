@@ -678,7 +678,7 @@ function WatchTab() {
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
           h('textarea', {
-            'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
+            'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空 = 刷首页推荐流（像人一样随便逛）',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
           }),
           h('div', { 'data-bd-label': '' }, '它按什么说话（人设提示词，可留空）'),

@@ -29,6 +29,7 @@ from mcp.types import ImageContent, TextContent
 
 from bilibili_api import video, search, comment, Credential, dynamic, opus
 from bilibili_api import hot, rank, user, session, favorite_list
+from bilibili_api import homepage
 from bilibili_api.video_uploader import (
     VideoUploader, VideoUploaderPage, VideoMeta, Lines,
 )
@@ -1653,6 +1654,78 @@ async def bili_frames(bvid: str, num: int = 3, at: list | None = None) -> list:
         }, ensure_ascii=False)),
         *blocks,
     ]
+
+
+# ========== Tool: 首页推荐流（不填关键词时用它，替代固定关键词搜索） ==========
+# ⭐ 为什么要它（2026-10-23 主人拍板）：
+#    以前不填关键词就用内置那几组（DeepSeek Harness / DSH 插件 …）⇒ **所有装了插件的人刷的是同一批视频**
+#    ⇒ 相关视频的评论区必然堆成一片"同款插件在互相报到" ✗
+#    推荐流按各自账号画像推，天然散开 ✓ —— 这是结构性解法，比"每轮少发几条"靠谱得多。
+#
+# ⚠️ 它需要登录凭证（匿名也能拿到一部分，但带凭证才是"这个账号的推荐"），
+#    所以这里用 load_credential()；拿不到就退成匿名（仍然能用，只是不那么"散"）。
+@tool()
+async def bili_recommend(ps: int = 20) -> str:
+    """
+    获取「首页推荐流」的视频（按当前登录账号的画像）
+
+    Args:
+        ps: 返回几条，默认 20，最多 40
+
+    Returns:
+        JSON 格式的视频列表，字段与 bili_search 对齐（bvid / title / author / play / danmaku / duration…）
+    """
+    denied = _guard("bili_recommend")
+    if denied:
+        return json.dumps({"ok": False, "error": denied}, ensure_ascii=False)
+
+    cred = None
+    try:
+        cred = load_credential()
+    except Exception:
+        cred = None
+
+    try:
+        data = await homepage.get_videos(credential=cred)
+    except Exception as e:  # noqa: BLE001 - 统一收成 ok:false，别把原始异常甩给模型
+        return json.dumps({"ok": False, "error": f"取推荐流失败：{e}"}, ensure_ascii=False)
+
+    items = []
+    if isinstance(data, dict):
+        items = data.get("item") or data.get("data") or []
+    elif isinstance(data, list):
+        items = data
+
+    videos = []
+    for it in items[: max(1, min(int(ps), 40))]:
+        if not isinstance(it, dict):
+            continue
+        # 只留视频（推荐流里会混进直播 / 番剧 / 广告卡片）
+        if it.get("goto") and it.get("goto") != "av":
+            continue
+        if not it.get("bvid"):
+            continue
+        owner = it.get("owner") or {}
+        stat = it.get("stat") or {}
+        dur = it.get("duration")
+        videos.append({
+            "bvid": it.get("bvid", ""),
+            "title": str(it.get("title", "")).strip(),
+            "author": owner.get("name", ""),
+            "play": stat.get("view", 0),
+            "danmaku": stat.get("danmaku", 0),
+            "like": stat.get("like", 0),
+            "duration": f"{int(dur) // 60}:{int(dur) % 60:02d}" if isinstance(dur, (int, float)) else str(dur or ""),
+            "pubdate": it.get("pubdate", 0),
+            "reason": (it.get("rcmd_reason") or {}).get("content", "") if isinstance(it.get("rcmd_reason"), dict) else "",
+        })
+
+    return json.dumps({
+        "ok": True,
+        "source": "recommend",
+        "count": len(videos),
+        "videos": videos,
+    }, ensure_ascii=False)
 
 
 # ========== 启动 ==========
