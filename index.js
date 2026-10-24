@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
+import { diagnoseRound } from './lib/diagnose.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -1374,9 +1375,13 @@ function reportMeta() {
 
   /**
    * ⭐ 保底：那一轮**没写出报告**时，宿主自己补一份"占位报告"。
-   * 起因（2026-10-16 用户实测反馈）：有一轮卡在"转写返回空 ⇒ 以为 ASR 坏了"上反复重试，
-   *   最后 `out/` 是空的、判重表也没建 ⇒ **使用者完全看不到发生了什么**，也不知道白烧了钱 ✗。
-   * ⚠️ 只在"报告本来该有却没有"时补（`reportLevel: off` 不补 ✓），不覆盖已有的报告 ✓。
+   * 起因①（2026-10-16 用户实测）：有一轮卡在"转写返回空 ⇒ 以为 ASR 坏了"上反复重试，
+   *   最后 `out/` 空、判重表也没建 ⇒ 使用者完全看不到发生了什么 ✗。
+   * 起因②（2026-10-24 用户实测）：`NO_ADAPTER: no adapter registered for provider "…"`
+   *   ⇒ 那一轮 1 秒 exit 1，报告里只有 code=1 ⇒ 用户看不懂 ✗。
+   * 现在：先从日志尾部认已知失败形态（`lib/diagnose.mjs`，纯函数），能认出来就把"是什么+怎么办"
+   *   写进报告顶部；认不出来就走原来的兜底文案（行为跟以前一样）。
+   * ⚠️ 只在"报告本来该有却没有"时补（`reportLevel: off` 不补），不覆盖已有报告。
    */
   const stubReportIfMissing = (code) => {
     try {
@@ -1384,16 +1389,36 @@ function reportMeta() {
       const f = join(outDir, `${dayKey()}.md`)
       if (existsSync(f)) return
       let tail = ''
-      try { tail = readFileSync(logFile, 'utf8').slice(-1500) } catch { /* 读不到就算了 */ }
+      try { tail = readFileSync(logFile, 'utf8').slice(-6000) } catch { /* 读不到就算了 */ }
+      // ⚠️ diagnoseRound 是纯函数、自己不会抛；这里再包一层是"绝不因为诊断把人搞挂"
+      let why = null
+      try { why = diagnoseRound(tail) } catch (e) { log(`诊断失败（已兜住）：${e?.message ?? e}`) }
+      if (why) log(`这一轮没跑起来：${why.title}`)
+      const head = why
+        ? [
+            `# 刷B站 · ${dayKey()} —— 这一轮没跑起来`,
+            '',
+            `> ⚠️ **${why.title}**（退出码 ${code}）`,
+            '',
+            why.body,
+            '',
+            '---',
+            '',
+            '## 日志尾部（完整版在 `duty.log`）',
+            '',
+          ]
+        : [
+            `# 刷B站 · ${dayKey()} —— 这一轮没写出报告`,
+            '',
+            `> ⚠️ 那一轮结束了，但没有生成正常报告（退出码 ${code}）。`,
+            '> 常见原因是它卡在某个工具上反复重试、或者把预算烧完了。下一轮它会重来。',
+            '> 下面附日志尾部，方便定位（插件数据目录里的 `duty.log` 有完整版）。',
+            '',
+          ]
       writeFileSync(f, [
-        `# 刷B站 · ${dayKey()} —— 这一轮没写出报告`,
-        '',
-        `> ⚠️ 那一轮结束了，但没有生成正常报告（退出码 ${code}）。`,
-        '> 常见原因是它卡在某个工具上反复重试、或者把预算烧完了。下一轮它会重来。',
-        '> 下面附日志尾部，方便定位（插件数据目录里的 `duty.log` 有完整版）。',
-        '',
+        ...head,
         '```',
-        String(tail).trim(),
+        String(tail).trim().slice(-4000),
         '```',
         '',
       ].join('\n'), 'utf8')
