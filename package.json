@@ -22,6 +22,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "profile-template",
     "index.js",
     "client.js",
     "cordis.patch.yml",

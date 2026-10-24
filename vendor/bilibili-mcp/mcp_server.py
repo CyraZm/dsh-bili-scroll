@@ -1134,6 +1134,193 @@ async def bili_received_at_and_likes() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+# ========== 值班轮窄口 IO（2026-10-24 · issue #96 安全加固）==========
+# ⭐ 值班轮现在跑在「最小权限 profile」上：**没有文件系统、没有 shell、没有 web**。
+#    但它还得写日报 / 判重表 / 归档、还得能转写 —— 所以这几件事做成**固定路径的窄口工具**：
+#    · 只写 <家>/out/<日期>.md、<家>/seen.md、<家>/digest/<年-月>.md
+#    · **不接受任何路径参数**（想写别处也写不了）✓
+#    · 输入里的竖线会被转义，标题带 | 也不会把表格弄坏
+import datetime as _dt
+
+DUTY_HOME = Path(os.environ.get("BILI_DUTY_HOME") or (Path.home() / ".dsh" / "bili-duty"))
+
+
+def _duty_today() -> str:
+    return _dt.datetime.now().strftime("%Y-%m-%d")
+
+
+def _cell(s: str, limit: int = 60) -> str:
+    """表格单元格：去换行、转义竖线、截断。"""
+    t = " ".join(str(s or "").split())
+    return t.replace("|", "\\|")[:limit]
+
+
+def _append(path: Path, text: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    return str(path)
+
+
+@tool()
+def duty_paths() -> str:
+    """
+    这一轮允许写的三个位置（绝对路径）—— 想写东西只能通过这些 duty_* 工具，不要找别的路。
+
+    Returns:
+        报告 / 判重表 / 归档 的绝对路径
+    """
+    out = {
+        "home": str(DUTY_HOME),
+        "report": str(DUTY_HOME / "out" / (_duty_today() + ".md")),
+        "seen": str(DUTY_HOME / "seen.md"),
+        "digest": str(DUTY_HOME / "digest" / (_dt.datetime.now().strftime("%Y-%m") + ".md")),
+    }
+    return json.dumps(out, ensure_ascii=False)
+
+
+@tool()
+def duty_report_append(text: str) -> str:
+    """
+    往**今天的日报**末尾追加一段（文件不存在会自动建）。
+
+    Args:
+        text: 要追加的内容（markdown 纯文本）
+
+    Returns:
+        写到了哪个文件
+    """
+    body = str(text or "").replace("\r\n", "\n").strip()
+    if not body:
+        return "没写：内容是空的"
+    p = DUTY_HOME / "out" / (_duty_today() + ".md")
+    fresh = not p.exists()
+    payload = body + "\n"
+    if fresh:
+        payload = "# 刷B站日报 " + _duty_today() + "\n\n" + payload
+    return "已追加到 " + _append(p, payload)
+
+
+@tool()
+def duty_seen_append(bvid: str, title: str, up: str, status: str, date: str = "") -> str:
+    """
+    往判重表追加一行（「挑了」= 进过报告 / 「跳过」= 看过但没进 / 「评论」= 本轮 @ 过）。
+
+    Args:
+        bvid: BV 号
+        title: 标题
+        up: UP 主
+        status: 挑了 / 跳过 / 评论
+        date: 日期（YYYY-MM-DD，留空=今天）
+
+    Returns:
+        写到了哪个文件
+    """
+    bv = str(bvid or "").strip()
+    if not bv:
+        return "没写：bvid 是空的"
+    d = (str(date or "").strip() or _duty_today())[:10]
+    row = f"| {_cell(d, 10)} | {_cell(bv, 16)} | {_cell(title)} | {_cell(up, 30)} | {_cell(status, 8)} |\n"
+    return "已追加到 " + _append(DUTY_HOME / "seen.md", row)
+
+
+@tool()
+def duty_seen_recent(limit: int = 40, bvid: str = "") -> str:
+    """
+    读判重表的最近若干行（只读，只读插件自己那份 seen.md）。
+
+    Args:
+        limit: 取最近多少行（默认 40，上限 200）
+        bvid: 只查某个 BV（留空=看全部）
+
+    Returns:
+        表格行（日期 | BV | 标题 | UP | 状态）；空 = 这份表还没内容
+    """
+    f = DUTY_HOME / "seen.md"
+    if not f.exists():
+        return "（判重表还不存在）"
+    try:
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as e:
+        return "读不到判重表：" + str(e)
+    rows = [ln for ln in lines if ln.strip().startswith("|") and "---" not in ln and not ln.strip().startswith("| 日期")]
+    if bvid:
+        bv = str(bvid).strip()
+        rows = [ln for ln in rows if bv in ln]
+    n = max(1, min(int(limit or 40), 200))
+    tail = rows[-n:]
+    if not tail:
+        return "（最近没有记录）"
+    return "共 " + str(len(rows)) + " 行，最近 " + str(len(tail)) + " 行：\n" + "\n".join(tail)
+
+
+@tool()
+def duty_digest_append(text: str) -> str:
+    """
+    往**本月归档**末尾追加一段（「digest/<年-月>.md」，给"后来翻旧账"用的）。
+
+    Args:
+        text: 要追加的内容
+
+    Returns:
+        写到了哪个文件
+    """
+    body = str(text or "").replace("\r\n", "\n").strip()
+    if not body:
+        return "没写：内容是空的"
+    p = DUTY_HOME / "digest" / (_dt.datetime.now().strftime("%Y-%m") + ".md")
+    return "已追加到 " + _append(p, body + "\n")
+
+
+@tool()
+def bili_transcribe(bvid: str) -> str:
+    """
+    用本地 ASR（家目录里的独立环境）把一条**没有字幕**的视频转成文字。慢（几分钟）。
+
+    Args:
+        bvid: BV 号
+
+    Returns:
+        转写出来的文字（截断到 12000 字）；空的 / 只有署名 ⇒ 当作这条没有语音
+    """
+    import subprocess
+
+    bv = str(bvid or "").strip()
+    if not bv.startswith("BV"):
+        return "参数不对：要给 BV 号"
+    py_candidates = [
+        DUTY_HOME / ".venv-asr" / "Scripts" / "python.exe",
+        DUTY_HOME / ".venv-asr" / "bin" / "python",
+    ]
+    py = next((str(p) for p in py_candidates if p.exists()), "")
+    if not py:
+        return "转写环境没装好（设置页里有「装转写依赖」）"
+    script = DUTY_HOME / "asr.py"
+    if not script.exists():
+        return "找不到 asr.py（家目录里没有转写脚本）"
+    out = DUTY_HOME / "tmp" / (bv + ".txt")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            [py, str(script), bv, "-o", str(out)],
+            capture_output=True, timeout=1800,
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        )
+    except subprocess.TimeoutExpired:
+        return "转写超时（30 分钟）—— 这条按「读不到」处理，跳过它"
+    except Exception as e:
+        return "转写启动失败：" + str(e)
+    if not out.exists():
+        tail = (r.stderr or b"")[-400:].decode("utf-8", "replace")
+        return "转写没产出文件（exit " + str(r.returncode) + "）：" + tail
+    text = out.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return "（空）—— 这条没有语音，跳过它"
+    if len(text) <= 40 and ("字幕by" in text or "字幕BY" in text):
+        return "（只有署名「" + text[:40] + "」）—— 当没有语音处理，跳过"
+    return text[:12000]
+
+
 # ========== 启动 ==========
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -77,7 +77,8 @@ export const Config = !z ? undefined : z.object({
   /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
   dshBin: z.string().default('').extra('volatile', true),
   /** headless 那一轮用哪个 profile */
-  headlessProfile: z.string().default('headless').extra('volatile', true),
+  // ⭐ 2.0.5：默认换成"最小权限 profile"（只有 B站 MCP + 窄口 IO，没有文件系统/命令/联网）
+  headlessProfile: z.string().default('bili-duty').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 跑 headless 时的工作目录 */
@@ -761,6 +762,20 @@ function reportMeta() {
     return st.day === dayKey(now) ? Number(st.count || 0) : 0
   }
 
+  // ⭐⭐ 2.0.5（2026-10-24 用户实证，群友「羽涅」）：一键升级以前把 profile 写死成 web ✗
+  //    桌面版用户的 profile 是 desktop ⇒ 升级失败，反而把 0.1.7 装进 web 里，越修越乱 ✓
+  //    现在从"自己这个模块的真实路径"里取 profile 名：挂载点是 ~/.dsh/profiles/<名字>/node_modules/<包>/
+  const ownProfileName = (() => {
+    try {
+      const u = String(import.meta.url || '').replace(/\\/g, '/')
+      const m = u.match(/\/profiles\/([^/]+)\/node_modules\//)
+      return m ? m[1] : ''
+    } catch { return '' }
+  })()
+  const profileArg = ownProfileName || 'web'
+  // ⭐ 顺带：把"我是从哪个 profile 加载的"报出来，排障时一眼看得出
+  try { log('插件加载自 profile：' + profileArg + (ownProfileName ? '' : '（没识别到，按默认 web 处理）')) } catch { /* 忽略 */ }
+
   // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add dsh-bili-scroll`
   //    ⚠️ 装完必须重启 dsh 才生效；⚠️ Windows 上"替换正在运行的插件"可能被文件占用挡住（我们踩过）
   let upgrading = false
@@ -799,17 +814,17 @@ function reportMeta() {
         // ⚠️ 2026-10-19：找不到 dsh 时不再硬跑，直接把要做的事说清楚
         if (dsh.missing) {
           appendInstall('=== 没法自动升级：找不到 dsh。' + dsh.hint + ' ===\n')
-          appendInstall('=== 也可以自己手动跑一次：dsh plugin --profile web add dsh-bili-scroll ===\n')
+          appendInstall('=== 也可以自己手动跑一次：dsh plugin --profile ' + profileArg + ' add dsh-bili-scroll ===\n')
           upgrading = false
           return
         }
         let cmd = dsh.command || 'dsh'
-        let args = [...(dsh.args || []), 'plugin', '--profile', 'web', 'add', spec]
+            let args = [...(dsh.args || []), 'plugin', '--profile', profileArg, 'add', spec]
         if (dsh.shell) { args = ['/c', cmd, ...args]; cmd = 'cmd.exe' }
         appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
         const code = await spawnTo(cmd, args, { sink: appendInstall })
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
-        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add dsh-bili-scroll ===\n')
+        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile ' + profileArg + ' add dsh-bili-scroll ===\n')
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
     })()
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
@@ -1117,6 +1132,10 @@ function reportMeta() {
    */
   const mcpWhitelist = () => {
     const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+    // ⭐⭐ 2.0.5（issue #96 安全加固）：值班轮改成最小权限 profile（没有 fs / shell / web）⇒
+    //    写日报 / 判重表 / 归档、以及无字幕转写，全走这几只**固定路径的窄口工具** ✓
+    list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_digest_append', 'duty_seen_recent')
+    if (cfg.asrInstalled !== false) list.push('bili_transcribe')
     // ⭐⭐ 2.0.4（第三方体检第 3 条）：**"只发私信"时评论通道必须硬关** —— 以前只看 autoComment，
     //    用户以前开过自动评论、后来切到"只私信"，那个 true 还在 config 里 ⇒ 评论工具照样下发 ✗
     const dmOnly = String(cfg.dmMode || '').trim() === 'only'
@@ -1126,6 +1145,34 @@ function reportMeta() {
     //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
   if (String(cfg.dmMode || 'off') !== 'off' || cfg.dmWatch) list.push('bili_send_message')   // 2026-10-21：UID 可能靠昵称查，别再拿 dmUid>0 当条件
     return list
+  }
+
+
+  // ⭐⭐ 2.0.5（issue #96 / PR #97 思路）：把「值班轮专用 profile」铺到 <DSH_HOME>/profiles/bili-duty/
+  //    · 组成 = dsh-base + dsh-headless + 我们那层 cordis.patch.yml（关掉 fs / shell / web / subagent / skill…）
+  //    · 铺不上就明确退回 headless，并在日志里说清"这一轮不是最小权限"（失败要出声）
+  let dutyProfileState = 'unknown'   // ok / missing / failed
+  const dutyProfileDir = join(dirname(stateDir), 'profiles', 'bili-duty')
+  const ensureDutyProfile = () => {
+    try {
+      const src = join(pluginDir, 'profile-template', 'bili-duty')
+      if (!existsSync(src)) { dutyProfileState = 'missing'; return false }
+      mkdirSync(dirname(dutyProfileDir), { recursive: true })
+      // 每次启动都覆盖（模板很小；这是安全边界，用户改它也会被覆盖）
+      cpSync(src, dutyProfileDir, { recursive: true, force: true })
+      dutyProfileState = existsSync(join(dutyProfileDir, 'cordis.patch.yml')) ? 'ok' : 'failed'
+      return dutyProfileState === 'ok'
+    } catch (e) {
+      dutyProfileState = 'failed'
+      log('⚠️ 最小权限 profile 没铺成功（' + String(e?.message ?? e) + '）⇒ 这一轮会退回 headless')
+      return false
+    }
+  }
+  // 真正用的 profile：用户手填了别的就尊重；还是老默认 has headless ⇒ 用最小权限那个
+  const effectiveProfile = () => {
+    const want = String(cfg.headlessProfile || '').trim()
+    if (want && want !== 'headless' && want !== 'bili-duty') return want
+    return dutyProfileState === 'ok' ? 'bili-duty' : (want || 'headless')
   }
 
   const ensureOverlay = () => {
@@ -1266,7 +1313,7 @@ function reportMeta() {
       return { started: false, why, error: msg }
     }
     const overlay = ensureOverlay()
-    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
+      const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
     args.push(promptFor())
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
@@ -1421,6 +1468,46 @@ function reportMeta() {
     } catch { return null }
   }
 
+  // ⭐⭐ 2.0.5（有人反馈"私信没有上下文" —— 属实）：以前每条私信都是一次全新会话 ⇒ 它永远"初次见面" ✗
+  //    现在固定**续同一个会话**：headless 支持 `--session-id <id>`，历史由 DSH 自己带着、超上限它自己压缩 ✓
+  //    第一次跑完把开出来的会话 id 记到 dm-session.json；之后每次都带上；会话失效就丢掉重开（不会卡死）✓
+  const dmSessionFile = join(stateDir, 'dm-session.json')
+  const readDmSession = () => {
+    try {
+      const j = JSON.parse(readFileSync(dmSessionFile, 'utf8'))
+      return j && typeof j.id === 'string' && j.id ? j.id : ''
+    } catch { return '' }
+  }
+  const writeDmSession = (id) => { try { writeFileSync(dmSessionFile, JSON.stringify({ id, at: Date.now() }, null, 2), 'utf8') } catch { /* 写不了下次再认 */ } }
+  // 跑完之后，从 $DSH_HOME/sessions/*/<id>/ 里找"这次新出现的那个"（mtime 晚于启动时刻）
+  const discoverDmSession = (sinceTs) => {
+    try {
+      const root = join(process.env.DSH_HOME || join(process.env.USERPROFILE || '', '.dsh'), 'sessions')
+      if (!existsSync(root)) return ''
+      // ⚠️ 只认"这一轮工作目录 = 插件家"那个 workspace（否则会误认到自己聊天那条会话 ✗）
+      //    命名规则：--<盘符去掉冒号>-<路径用横线拼>--（如 --C-Users-99496-.dsh-bili-duty--）
+      const wantWs = '--' + stateDir.replace(/:/g, '').replace(/[\\/]/g, '-') + '--'
+      let best = ''
+      let bestAt = 0
+      const scanWs = [wantWs].filter((w) => existsSync(join(root, w)))
+      const list = scanWs.length ? scanWs : readdirSync(root)
+      for (const ws of list) {
+        const wsDir = join(root, ws)
+        let dirs = []
+        try { dirs = readdirSync(wsDir) } catch { continue }
+        for (const d of dirs) {
+          const full = join(wsDir, d)
+          try {
+            const st = statSync(full)
+            if (!st.isDirectory()) continue
+            if (st.mtimeMs >= sinceTs && st.mtimeMs > bestAt) { bestAt = st.mtimeMs; best = d }
+          } catch { /* 跳过 */ }
+        }
+      }
+      return best
+    } catch { return '' }
+  }
+
   function dmPromptFor(fromUid, text) {
     const raw = String(text || '').slice(0, 600)
     const bv = (raw.match(/BV[0-9A-Za-z]{10}/) || [])[0] || ''
@@ -1448,10 +1535,14 @@ function reportMeta() {
       const dsh = resolveDsh()
       if (dsh.missing) { log('私信回复没跑：找不到 dsh（' + dsh.hint + '）'); return { ok: false } }
       const overlay = ensureOverlay()
-      const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
-      if (overlay) args.push('--patch', overlay)
-      args.push(dmPromptFor(fromUid, text))
-      log(`私信回复开跑：来自 uid=${fromUid}`)
+      const base = [...dsh.args, '--profile', effectiveProfile()]
+      if (overlay) base.push('--patch', overlay)
+      if (dmReplyRunning) { log('私信回复：上一条还在跑 ⇒ 这条等下一跳'); return { ok: false, busy: true } }
+      dmReplyRunning = true
+      const savedSid = readDmSession()
+      const args = savedSid ? [...base, '--session-id', savedSid, dmPromptFor(fromUid, text)] : [...base, dmPromptFor(fromUid, text)]
+      log(`私信回复开跑：来自 uid=${fromUid}` + (savedSid ? '（续会话 ' + savedSid.slice(0, 20) + '…）' : '（开新会话）'))
+      const startedAt = Date.now()
       const child = spawn(dsh.command, args, {
         cwd: stateDir, shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
         env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
@@ -1460,13 +1551,31 @@ function reportMeta() {
       const pick = (buf) => { try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 丢日志也不能抛 */ } }
       child.stdout?.on('data', pick)
       child.stderr?.on('data', pick)
-      child.on('exit', (code) => { log(`私信回复结束（code=${code}）`); rotateLogIfBig() })
+      child.on('exit', (code) => {
+        dmReplyRunning = false
+        log(`私信回复结束（code=${code}）`)
+        rotateLogIfBig()
+        // ① 本来没有会话 id：跑完把它开出来的那个认领下来，下一条就能接着聊
+        if (!savedSid && code === 0) {
+          const id = discoverDmSession(startedAt)
+          if (id) { writeDmSession(id); log('私信会话已记录：' + id.slice(0, 24) + '…（以后私信都接着这个会话）') }
+          else log('⚠️ 没找到这次的会话 id ⇒ 下一条私信还是新会话（不影响回复，只是没上下文）')
+        }
+        // ② 带了 id 却失败（会话被删/迁移过）⇒ 丢掉它，下一条重开，别卡死在坏 id 上
+        if (savedSid && code !== 0) {
+          writeDmSession('')
+          log('⚠️ 续会话失败（' + savedSid.slice(0, 16) + '…）⇒ 清掉 id，立刻用新会话重试一次（这条不能没回）')
+          setTimeout(() => { try { runDmReply(fromUid, text) } catch { /* 兜住 */ } }, 800)
+        }
+      })
       return { ok: true }
     } catch (e) { log('私信回复出错：' + String(e?.message ?? e)); return { ok: false } }
   }
 
   let dmTimer = null
   let dmBusy = false
+  // ⭐ 2.0.5：一条私信回复没跑完时，不要让下一条进来（不然两个进程抢同一个会话，DSH 会报 "already owned by an active write handle"）
+  let dmReplyRunning = false
   async function dmTick() {
     if (dmBusy) return
     dmBusy = true
@@ -2422,7 +2531,7 @@ function reportMeta() {
         '版本：' + myVersion(),
         '平台：' + process.platform + ' ' + process.arch + ' · node ' + process.versions.node + (process.versions.electron ? ' · electron ' + process.versions.electron : ''),
         'dsh：' + (() => { try { const d = resolveDsh(); return d.missing ? '没找到（' + d.hint + '）' : d.command + ' ' + d.args.join(' ') } catch (e) { return '探测失败：' + e?.message } })(),
-        'headless profile：' + (cfg.headlessProfile || 'headless'),
+        'headless profile：' + effectiveProfile() + '（最小权限：' + dutyProfileState + '）',
         'pythonPath：' + cfg.pythonPath,
         'venv 就绪：' + (venvReadyNow() ? '是' : '否') + (missingVenvDeps().length ? '（缺：' + missingVenvDeps().join(' / ') + '）' : ''),
         '转写环境：' + (existsSync(join(stateDir, '.venv-asr')) ? '在' : '没装'),
@@ -2544,7 +2653,14 @@ function reportMeta() {
       if (!pick) return true   // 不是浏览器发的（本机脚本/宿主内部）
       try {
         const u = new URL(pick)
-        return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)
+        // ⭐ 2.0.5（采纳 PR #94）：**端口也要比** —— 只比 hostname 的话，
+        //    本机上另一个端口的页面（dev server / Jupyter / 有 XSS 的本地页）也能驱动这些写接口 ✗
+        const originAuthority = String(u.host || '').toLowerCase()
+        const hostAuthority = String(host).toLowerCase()
+        if (originAuthority && originAuthority === hostAuthority) return true
+        const defaultPort = u.protocol === 'https:' ? '443' : '80'
+        const withPort = (u.hostname + ':' + (u.port || defaultPort)).toLowerCase()
+        return withPort === hostAuthority
       } catch { return false }
     } catch { return false }
   }
@@ -2555,15 +2671,40 @@ function reportMeta() {
   //    返回 undefined = 放行；返回数字 = 回这个状态码（通常 401）
   //    ⚠️ 栅栏不可用时不静默放行：仍要求过"本机同源"，两道都不成 ⇒ 拒 ✓
   let fenceWarned = false
+  // ⭐ 取 connection 的三种写法都试（实测：Reflect.get 在插件 ctx 上拿不到 ⇒ 2026-10-23 真机验证后发现）
+  let nodeConnCached = null
+  let nodeConnTried = false
+  const getConnection = () => {
+    if (nodeConnTried) return nodeConnCached
+    nodeConnTried = true
+    const tries = [
+      ['ctx.get("connection")', () => (typeof ctx.get === 'function' ? ctx.get('connection') : null)],
+      ['Reflect.get(ctx, "connection")', () => Reflect.get(ctx, 'connection')],
+      ['ctx.root.connection', () => (ctx.root && typeof ctx.root === 'object' ? ctx.root.connection : null)],
+    ]
+    for (const [how, fn] of tries) {
+      try {
+        const c = fn()
+        if (c && typeof c.requestRejection === 'function') {
+          nodeConnCached = c
+          log('信任栅栏：用 ' + how + ' 拿到了 connection 服务 ✓')
+          return c
+        }
+      } catch { /* 换下一个 */ }
+    }
+    log('⚠️ 三种写法都拿不到 connection.requestRejection ⇒ 退回"本机同源"这一道')
+    return null
+  }
   const fenceReject = (req, res) => {
-    let conn = null
-    try { conn = Reflect.get(ctx, "connection") } catch { conn = null }
-    if (!conn || typeof conn.requestRejection !== "function") {
+    const conn = getConnection()
+    if (!conn) {
       if (!fenceWarned) { fenceWarned = true; log("⚠️ 拿不到 DSH 信任栅栏（connection.requestRejection）⇒ 退回本机同源这一道") }
       return false
     }
     try {
-      const rejection = conn.requestRejection(req)
+      // ⭐ 2.0.5（采纳 PR #94）：契约入参是 `{ headers }`（ConnectionTrustRequest），不是原始 IncomingMessage；
+      //    两种形状都给一遍，谁的实现都能接住（实测传原始 req 也能过，但按契约来更稳）
+      const rejection = conn.requestRejection({ headers: req.headers })
       if (rejection === undefined) return false
       res.statusCode = typeof rejection === "number" ? rejection : 403
       try { res.end() } catch { /* 忽略 */ }
@@ -2596,5 +2737,8 @@ function reportMeta() {
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'bili-duty: 收 MCP 子进程')
+  try { ensureDutyProfile() } catch { /* 上面已记日志 */ }
+  if (dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
+  else log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')
   log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，峰谷=${cfg.peakValley ? '开' : '关'}）`)
 }
