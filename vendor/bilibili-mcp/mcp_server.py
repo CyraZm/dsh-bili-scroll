@@ -18,6 +18,7 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #         图能不能进模型上下文由宿主判断）
 import asyncio
 import json
+import re
 import base64
 import os
 import struct
@@ -66,6 +67,112 @@ def _guard(name: str) -> str:
     if _ALLOWED and name not in _ALLOWED:
         print(f"[bili-mcp] 拒绝调用 {name}（不在 BILI_MCP_TOOLS 白名单里）", file=sys.stderr)
         return f"这个工具没开：{name}"
+    return ""
+
+
+# ⭐⭐ 语感闸门（治"鱼八股"）：**发评论之前，先在函数里拦一道**
+#   背景：章程里写"要有具体细节、别客套"，模型照样写"这条我认""值得一看" ——
+#         禁令没有范例有效、自觉没有拦截可靠 ⇒ 在执行层做最后一道检查（跟 _guard 同一思路）。
+#   三道检查（便宜、纯本地 / 一次轻请求）：
+#     ① 开头八股黑名单（正则）
+#     ② 跟**自己以前发过的评论**太像（bigram 相似度）—— 治"每条一个味"
+#     ③ 跟**这条视频现有热评**太像 —— 治"跟别的鱼撞车"
+#   ⚠️ 撞了就**不发**，把原因和改法返回给模型，让它重写一句。
+#   ⚠️ 关掉：`BILI_STYLE_OFF=1`。
+_STYLE_OFF = os.environ.get("BILI_STYLE_OFF", "") in ("1", "true", "yes")
+_STYLE_LEAD = re.compile(
+    r"^\s*(?:"
+    r"这条(?:我认|我记下了|值得)|我记下了|值得一看|确实值得|不得不说|"
+    r"好家伙|这个(?:必须|真的要)|强烈推荐|感谢分享|学到了|受教了|"
+    r"作为一个|总之|综上"
+    r")"
+)
+
+
+def _bigrams(s: str) -> set:
+    t = re.sub(r"[^\w\u4e00-\u9fff]", "", "".join(ch for ch in str(s or "") if not ch.isspace()))
+    if len(t) < 2:
+        return set(t)
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def _sim(a: str, b: str) -> float:
+    """bigram Jaccard —— 够用、够快、零依赖"""
+    x, y = _bigrams(a), _bigrams(b)
+    if not x or not y:
+        return 0.0
+    return len(x & y) / max(1, len(x | y))
+
+
+def _ledger_path():
+    try:
+        return DUTY_HOME / "comments.md"
+    except Exception:
+        return Path(__file__).parent / "comments.md"
+
+
+def _ledger_recent(n: int = 30):
+    """最近 n 条"自己发过的评论"正文（台账一行：`- 日期 BVID rpid=… · 正文`）"""
+    try:
+        p = _ledger_path()
+        if not p.exists():
+            return []
+        out = []
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if not ln.startswith("- "):
+                continue
+            body = ln.split("·", 1)[1].strip() if "·" in ln else ln[2:].strip()
+            if body:
+                out.append(body)
+        return out[-n:]
+    except Exception:
+        return []
+
+
+def _ledger_append(text: str, bvid: str, rpid=None):
+    try:
+        p = _ledger_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"- {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')} {bvid} rpid={rpid or 0} · {' '.join(str(text).split())}\n")
+    except Exception:
+        pass
+
+
+async def _style_reason(text: str, bvid: str, cred) -> str:
+    """返回"为什么这句不能发"；空串 = 可以发"""
+    if _STYLE_OFF:
+        return ""
+    body = " ".join(str(text or "").split())
+    if not body:
+        return "评论是空的。"
+    m = _STYLE_LEAD.match(body)
+    if m:
+        return (f"开头「{m.group(0).strip()}」是鱼八股。直接说这条视频里的具体东西："
+                "「这期讲了什么 + 一个只有看了才说得出的细节」，开头别用套话。")
+    for old in _ledger_recent(30):
+        s = _sim(body, old)
+        if s >= 0.55:
+            return (f"这句跟你以前发过的「{old[:18]}…」太像了（相似度 {s:.2f}）。"
+                    "换开头、换关注点，别套同一个句式。")
+    try:
+        v = video.Video(bvid=bvid, credential=cred)
+        aid = (await v.get_info())["aid"]
+        resp = await comment.get_comments(
+            oid=aid, type_=comment.CommentResourceType.VIDEO, page_index=1,
+            order=comment.OrderType.LIKE, credential=cred,
+        )
+        for c in (resp.get("replies") or [])[:20]:
+            other = " ".join(str((c.get("content") or {}).get("message", "")).split())
+            if not other:
+                continue
+            s = _sim(body, other)
+            if s >= 0.5:
+                return (f"这条视频底下已经有一句很像的（相似度 {s:.2f}）：{other[:24]}… "
+                        "撞车了 —— 换个角度写，或者这一轮不发。")
+    except Exception:
+        pass  # 读不到热评就不做这道检查（不能因为读不到就不让发）
     return ""
 
 
@@ -541,6 +648,10 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     """
     _deny = _guard("bili_reply")
     if _deny: return _deny
+    # ⭐ 语感闸门：撞八股 / 撞自己以前的 / 撞这条视频的热评 ⇒ 不发，把改法告诉模型
+    _style = await _style_reason(text, bvid, get_cred())
+    if _style:
+        return json.dumps({"ok": False, "sent": False, "blocked_by": "style", "error": _style}, ensure_ascii=False)
     cred = get_cred()
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
@@ -573,6 +684,7 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         #    （lib/verify.mjs）也要拿它去 B站 查公开可见性。只回 success 的话那条链是断的。
         #（2026-10-16 审查修：原实现把上面的 result 丢掉了）
         out = {"success": True, "message": "评论发送成功"}
+        _ledger_append(text, bvid, result.get("rpid") if isinstance(result, dict) else None)
         if isinstance(result, dict):
             for key in ("rpid", "rpid_str", "root", "parent"):
                 val = result.get(key)

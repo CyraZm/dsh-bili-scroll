@@ -1198,6 +1198,18 @@ function reportMeta() {
       + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
+      // ⭐ 2026-11 语感：把"它自己以前发过的评论"喂进去 —— 没有这段，它每轮都从零开始，
+      //    自然每条都往"平均腔调"上靠（那就是鱼八股）。有这段它才会长出自己的口癖、并避开重复开头。
+      + (() => {
+        try {
+          const led = join(stateDir, 'comments.md')
+          if (!existsSync(led)) return ''
+          const rows = readFileSync(led, 'utf8').split('\n').filter((l) => l.trim().startsWith('- '))
+          const bodies = rows.slice(-5).map((l) => (l.includes('·') ? l.split('·').slice(1).join('·') : l.slice(2)).trim()).filter(Boolean)
+          if (!bodies.length) return ''
+          return `⭐ **你以前发过的评论**（写新的之前先看一遍：**别用相同的开头、别套同一个句式**，它应该越来越像"这一个它"而不是模板）：` + bodies.map((b) => '「' + b.slice(0, 60) + '」').join(' ') + '。'
+        } catch { return '' }
+      })()
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
         ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
         : (dmModeEff === 'only'

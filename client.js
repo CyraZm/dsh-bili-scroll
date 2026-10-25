@@ -681,7 +681,7 @@ function WatchTab() {
             'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空 = 刷首页推荐流（像人一样随便逛）',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
           }),
-          h('div', { 'data-bd-label': '' }, '它按什么说话（人设提示词，可留空）'),
+          h('div', { 'data-bd-label': '' }, '它按什么说话（人设提示词）—— 留空也能用：默认口语、短句、必带一个只有看了那条视频才说得出的细节'),
           h('textarea', {
             'data-bd-input': '', rows: 6,
             placeholder: '想让它怎么说话就写在这儿 —— 比如「叫我某某，说话简短点，别用 emoji」。也可以直接填一个文件路径（如 D:\\deepseek\\AGENTS.md，或它所在的那个目录），每次运行都会重新读那个文件。留空 = 按中性说话（不扮演任何人）。',

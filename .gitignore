@@ -15,3 +15,4 @@ log/
 # 跑 tools/check-vision.py 会生成
 __pycache__/
 *.pyc
+style-probe-*/
