@@ -1432,6 +1432,47 @@ function reportMeta() {
 
   // ⭐⭐ 2.0.4（第三方体检第 2 条）：**同一时间只允许一轮在跑**，并且**登记这个子进程**，
   //    关页面/卸载插件时能把它一起收掉（以前它没有锁、也不归 ctx.effect 管 ✗）。
+  // ⭐⭐ 2026-10-25：**跨宿主的运行锁**（issue 提到"没加原子锁"—— 那一半是真的）。
+  //    同一台机器可能同时开着网页版和桌面版两个 DSH，两边都装了插件、都有自己的定时器：
+  //    同一分钟两个都到点 ⇒ 都开跑 ⇒ **同一条视频被推两遍**，`seen.md` 也会多出重复行 ✗
+  //    （私信监听早就有 `dm-lock.json` 了，跑一轮这块一直只有"进程内"的标志位 ✗）
+  //    设计：一张带 pid + 时间的纸条，谁先写成谁跑，另一个让开；10 分钟自动过期（防进程崩了锁死）。
+  //    ⚠️ **写不了锁就照常跑** —— 宁可偶尔重复一次，也不能因为锁坏了就不干活。
+  const runLockFile = join(stateDir, 'run-lock.json')
+  const RUN_LOCK_TTL = 10 * 60_000
+  const pidAlive = (pid) => {
+    if (!pid) return false
+    try { process.kill(pid, 0); return true } catch { return false }
+  }
+  /** 试着占锁：拿到 ⇒ true；有人正占着（新鲜的、进程还活着、不是我）⇒ false */
+  const acquireRunLock = (why) => {
+    try {
+      let lock = null
+      try { lock = JSON.parse(readFileSync(runLockFile, 'utf8')) } catch { lock = null }
+      if (lock && Number(lock.pid) !== process.pid) {
+        const fresh = Number(lock.ts) > Date.now() - RUN_LOCK_TTL
+        if (fresh && pidAlive(Number(lock.pid))) {
+          log(`这一轮没跑（${why}）：另一个宿主正在跑（pid=${lock.pid}）⇒ 让给它`)
+          return false
+        }
+        if (!fresh) log('运行锁已过期（' + Math.round((Date.now() - Number(lock.ts)) / 60000) + ' 分钟前那个），这一轮照跑')
+      }
+      writeFileSync(runLockFile, JSON.stringify({ pid: process.pid, ts: Date.now(), why }), 'utf8')
+      return true
+    } catch (e) {
+      // 锁文件坏了/写不进去 ⇒ 不拦路（fail-open，但留痕）
+      log('运行锁读写失败（这一轮照跑）：' + String(e?.message ?? e))
+      return true
+    }
+  }
+  /** 放锁：只放自己的那张（别把别人的删了） */
+  const releaseRunLock = () => {
+    try {
+      const lock = JSON.parse(readFileSync(runLockFile, 'utf8'))
+      if (Number(lock?.pid) === process.pid) writeFileSync(runLockFile, '{"pid":0,"ts":0}', 'utf8')
+    } catch { /* 没有锁 / 读不出来 / 写不进去都无所谓，靠 10 分钟过期兜底 */ }
+  }
+
   let dutyChild = null
   let dutyStartedAt = 0
   const runDuty = (why = 'window') => {
@@ -1453,6 +1494,8 @@ function reportMeta() {
       try { stubReportIfMissing(1) } catch { /* 补不上也不影响这句话已经进日志 */ }
       return { started: false, why, error: msg }
     }
+    // ⭐ 跨宿主运行锁：拿到才跑（写不了锁时照常跑，函数内部已经 fail-open）
+    if (!acquireRunLock(why)) return { started: false, why, busy: true, error: '另一个宿主正在跑这一轮' }
     const overlay = ensureOverlay()
       const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
@@ -1496,6 +1539,7 @@ function reportMeta() {
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      releaseRunLock()            // ⭐ 这一轮结束了，把锁放开（删不掉也没事，10 分钟自动过期）
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
@@ -1519,7 +1563,7 @@ function reportMeta() {
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
     dutyChild = child
     dutyStartedAt = Date.now()
-    child.on('error', (e) => log(`刷B站起不来：${e?.message ?? e}`))
+    child.on('error', (e) => { releaseRunLock(); log(`刷B站起不来：${e?.message ?? e}`) })
     // ⭐ 起不来/被杀掉也要把锁放开，否则之后每一轮都会被判成'上一轮还没结束' ✗
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
     return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
