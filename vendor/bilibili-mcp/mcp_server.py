@@ -1389,10 +1389,110 @@ def duty_digest_append(text: str) -> str:
     return "已追加到 " + _append(p, body + "\n")
 
 
+# ========== 转写：非阻塞 + 单条排队 + 可取回的结果 ==========
+#
+# ⭐⭐ 2026-10-25 修（群友报的真 bug，附了 MCP SDK 源码依据）：
+#    原来的 `bili_transcribe` 是**同步 def**，里面 `subprocess.run(timeout=1800)`。
+#    mcp 1.30.0 的 func_metadata.py:114 对同步函数是**直接在事件循环里调用**（不是丢线程池），
+#    于是整条 stdio 会话被这一句占住 ⇒ 同一轮里其它工具（发私信 / 写判重表）全部 60s 超时，
+#    一整轮拖成 20 分钟，最后私信没发出去 ✗
+#
+#    所以改成两条路：
+#      · `bili_transcribe(bvid)`   —— 仍然是"要全文"，但**不再阻塞事件循环**（async + create_subprocess_exec）
+#                                    并且用信号量限制"一次只有一条"，避免几路 whisper 互相拖死
+#      · `bili_transcribe_start(bvid)` / `bili_transcribe_result(job_id)`
+#                                  —— **推荐用法**：立刻返回 job_id，轮次继续干别的；
+#                                    下一轮或收尾时再来取结果。慢活不该挂在一个工具调用的超时上。
+_TRANSCRIBE_SEM = asyncio.Semaphore(1)
+_TRANSCRIBE_JOBS = {}          # job_id -> {"state": running|done|error, "text": str, "bvid": str, "started": ts}
+_TRANSCRIBE_TIMEOUT = 900      # 15 分钟硬顶（原来是 1800，太长）
+_TRANSCRIBE_WAIT = 25         # 直接调用时最多等这么久（客户端单次调用常见 60s 超时）
+_TRANSCRIBE_KEEP = 8           # 只留最近 8 个 job 的结果，避免内存里堆一堆长文本
+
+
+def _transcribe_paths(bv: str):
+    """返回 (python, script, out_path)；缺东西时返回 (None, 原因, None)"""
+    py_candidates = [
+        DUTY_HOME / ".venv-asr" / "Scripts" / "python.exe",
+        DUTY_HOME / ".venv-asr" / "bin" / "python",
+    ]
+    py = next((str(p) for p in py_candidates if p.exists()), "")
+    if not py:
+        return None, "转写环境没装好（设置页里有「装转写依赖」）", None
+    script = DUTY_HOME / "asr.py"
+    if not script.exists():
+        return None, "找不到 asr.py（家目录里没有转写脚本）", None
+    out = DUTY_HOME / "tmp" / (bv + ".txt")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return py, script, out
+
+
+def _transcribe_read(out) -> str:
+    """把产物读成"给模型看的结果"（空的 / 只有署名 ⇒ 当作没有语音）"""
+    try:
+        if not out.exists():
+            return "转写没产出文件 —— 这条按「读不到」处理，跳过它"
+        text = out.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return "（空）—— 这条没有语音，跳过它"
+        if len(text) <= 40 and ("字幕by" in text or "字幕BY" in text):
+            return "（只有署名「" + text[:40] + "」）—— 当没有语音处理，跳过"
+        return text[:12000]
+    except Exception as e:
+        return "读转写结果失败：" + str(e)
+
+
+async def _transcribe_run(bv: str) -> str:
+    """真正跑转写（非阻塞）。信号量保证同一时间只有一条在跑。"""
+    py, script, out = _transcribe_paths(bv)
+    if not py:
+        return str(script)      # script 位置放的是错误文案
+    async with _TRANSCRIBE_SEM:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                py, str(script), bv, "-o", str(out),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            )
+        except Exception as e:
+            return "转写启动失败：" + str(e)
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=_TRANSCRIBE_TIMEOUT)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return f"转写超时（{_TRANSCRIBE_TIMEOUT // 60} 分钟）—— 这条按「读不到」处理，跳过它"
+        if not out.exists():
+            tail = (err or b"")[-400:].decode("utf-8", "replace")
+            return "转写没产出文件（exit " + str(proc.returncode) + "）：" + tail
+    return _transcribe_read(out)
+
+
+def _job_prune():
+    if len(_TRANSCRIBE_JOBS) <= _TRANSCRIBE_KEEP:
+        return
+    for k in list(_TRANSCRIBE_JOBS.keys())[: len(_TRANSCRIBE_JOBS) - _TRANSCRIBE_KEEP]:
+        _TRANSCRIBE_JOBS.pop(k, None)
+
+
+async def _job_run(job_id: str, bv: str):
+    try:
+        text = await _transcribe_run(bv)
+        _TRANSCRIBE_JOBS[job_id] = {"state": "done", "text": text, "bvid": bv, "started": _TRANSCRIBE_JOBS.get(job_id, {}).get("started", 0)}
+    except Exception as e:
+        _TRANSCRIBE_JOBS[job_id] = {"state": "error", "text": "转写异常：" + str(e), "bvid": bv, "started": 0}
+
+
 @tool()
-def bili_transcribe(bvid: str) -> str:
+async def bili_transcribe(bvid: str) -> str:
     """
-    用本地 ASR（家目录里的独立环境）把一条**没有字幕**的视频转成文字。慢（几分钟）。
+    用本地 ASR 把一条**没有字幕**的视频转成文字（慢，几分钟）。
+
+    ⚠️ 这个调用会**等到跑完**才返回（不再阻塞别的工具，但它自己会慢）。
+    更好的用法是先 `bili_transcribe_start` 拿 job_id，这一轮先干别的，之后用 `bili_transcribe_result` 取。
 
     Args:
         bvid: BV 号
@@ -1400,42 +1500,91 @@ def bili_transcribe(bvid: str) -> str:
     Returns:
         转写出来的文字（截断到 12000 字）；空的 / 只有署名 ⇒ 当作这条没有语音
     """
-    import subprocess
-
+    denied = _guard("bili_transcribe")
+    if denied:
+        return denied
     bv = str(bvid or "").strip()
     if not bv.startswith("BV"):
         return "参数不对：要给 BV 号"
-    py_candidates = [
-        DUTY_HOME / ".venv-asr" / "Scripts" / "python.exe",
-        DUTY_HOME / ".venv-asr" / "bin" / "python",
-    ]
-    py = next((str(p) for p in py_candidates if p.exists()), "")
+    # ⭐ 2026-10-25 二次修（真机实测）：直接 await 整条转写 ⇒ 客户端 60s 超时，
+    #    那一轮白等一次、还记了句"转写超时"✗
+    #    ⇒ 现在只等 _TRANSCRIBE_WAIT 秒：跑完就回文本，没跑完就**把 job_id 交回去**，
+    #      由模型下一轮用 bili_transcribe_result 取（比"超时"有用得多）
+    py, why, _out = _transcribe_paths(bv)
     if not py:
-        return "转写环境没装好（设置页里有「装转写依赖」）"
-    script = DUTY_HOME / "asr.py"
-    if not script.exists():
-        return "找不到 asr.py（家目录里没有转写脚本）"
-    out = DUTY_HOME / "tmp" / (bv + ".txt")
-    out.parent.mkdir(parents=True, exist_ok=True)
+        return str(why)
+    job_id = "tj" + _dt.datetime.now().strftime("%H%M%S") + "-" + bv[-4:]
+    _TRANSCRIBE_JOBS[job_id] = {"state": "running", "text": "", "bvid": bv, "started": _dt.datetime.now().timestamp()}
+    _job_prune()
+    task = asyncio.create_task(_job_run(job_id, bv))
     try:
-        r = subprocess.run(
-            [py, str(script), bv, "-o", str(out)],
-            capture_output=True, timeout=1800,
-            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
-        )
-    except subprocess.TimeoutExpired:
-        return "转写超时（30 分钟）—— 这条按「读不到」处理，跳过它"
-    except Exception as e:
-        return "转写启动失败：" + str(e)
-    if not out.exists():
-        tail = (r.stderr or b"")[-400:].decode("utf-8", "replace")
-        return "转写没产出文件（exit " + str(r.returncode) + "）：" + tail
-    text = out.read_text(encoding="utf-8", errors="replace").strip()
-    if not text:
-        return "（空）—— 这条没有语音，跳过它"
-    if len(text) <= 40 and ("字幕by" in text or "字幕BY" in text):
-        return "（只有署名「" + text[:40] + "」）—— 当没有语音处理，跳过"
-    return text[:12000]
+        await asyncio.wait_for(asyncio.shield(task), timeout=_TRANSCRIBE_WAIT)
+    except asyncio.TimeoutError:
+        return (f"转写还没跑完（超过 {_TRANSCRIBE_WAIT} 秒），已排进后台：job_id={job_id}。\n"
+                "**这一轮别等它** —— 先把报告 / 判重表 / 归档 / 私信做完；"
+                "下一轮或收尾前用 bili_transcribe_result(job_id) 取结果（还 running 就记「已排队，下一轮再判」）。")
+    job = _TRANSCRIBE_JOBS.get(job_id) or {}
+    if job.get("state") == "error":
+        return str(job.get("text") or "转写失败")
+    return str(job.get("text") or "转写没拿到内容")
+
+
+@tool()
+async def bili_transcribe_start(bvid: str) -> str:
+    """
+    开始一条转写任务，**立刻返回 job_id**（推荐用这个 —— 慢活不该占住这一轮）。
+
+    Args:
+        bvid: BV 号
+
+    Returns:
+        JSON：{"ok": true, "job_id": "…", "hint": "…"}
+    """
+    denied = _guard("bili_transcribe_start")
+    if denied:
+        return json.dumps({"ok": False, "error": denied}, ensure_ascii=False)
+    bv = str(bvid or "").strip()
+    if not bv.startswith("BV"):
+        return json.dumps({"ok": False, "error": "参数不对：要给 BV 号"}, ensure_ascii=False)
+    py, why, _out = _transcribe_paths(bv)
+    if not py:
+        return json.dumps({"ok": False, "error": why}, ensure_ascii=False)
+    job_id = "tj" + _dt.datetime.now().strftime("%H%M%S") + "-" + bv[-4:]
+    _TRANSCRIBE_JOBS[job_id] = {"state": "running", "text": "", "bvid": bv, "started": _dt.datetime.now().timestamp()}
+    _job_prune()
+    asyncio.create_task(_job_run(job_id, bv))
+    return json.dumps({
+        "ok": True,
+        "job_id": job_id,
+        "hint": "已排队。这一轮**别等**：先把报告 / 判重表 / 私信做完；下一轮或收尾时用 bili_transcribe_result 取结果。",
+    }, ensure_ascii=False)
+
+
+@tool()
+async def bili_transcribe_result(job_id: str) -> str:
+    """
+    取一条转写任务的结果（没有就返回 running）。
+
+    Args:
+        job_id: `bili_transcribe_start` 返回的那个 id
+
+    Returns:
+        JSON：{"state": "running|done|error", "text": "…"}
+    """
+    denied = _guard("bili_transcribe_result")
+    if denied:
+        return json.dumps({"ok": False, "error": denied}, ensure_ascii=False)
+    jid = str(job_id or "").strip()
+    job = _TRANSCRIBE_JOBS.get(jid)
+    if not job:
+        return json.dumps({"ok": False, "state": "unknown", "error": "没有这个 job（可能已经过期，或者 id 打错了）"}, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "state": job["state"],
+        "bvid": job["bvid"],
+        "text": job.get("text", "") if job["state"] != "running" else "",
+        "hint": "还在跑，这一轮先干别的" if job["state"] == "running" else "",
+    }, ensure_ascii=False)
 
 # ========== Tool 25: 看画面（封面） ==========
 #

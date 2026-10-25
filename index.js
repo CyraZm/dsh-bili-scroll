@@ -1270,7 +1270,9 @@ function reportMeta() {
     // ⭐⭐ 2.0.5（issue #96 安全加固）：值班轮改成最小权限 profile（没有 fs / shell / web）⇒
     //    写日报 / 判重表 / 归档、以及无字幕转写，全走这几只**固定路径的窄口工具** ✓
     list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_digest_append', 'duty_seen_recent')
-    if (cfg.asrInstalled !== false) list.push('bili_transcribe')
+    // ⭐ 2026-10-25：转写改成 job 模型（start / result）—— 慢活不该占住一次工具调用；
+    //    老的 bili_transcribe 还留着（仍能用，但它会等到跑完，别在一轮里连用两条）
+    if (cfg.asrInstalled !== false) list.push('bili_transcribe', 'bili_transcribe_start', 'bili_transcribe_result')
     // ⭐⭐ 2.0.4（第三方体检第 3 条）：**"只发私信"时评论通道必须硬关** —— 以前只看 autoComment，
     //    用户以前开过自动评论、后来切到"只私信"，那个 true 还在 config 里 ⇒ 评论工具照样下发 ✗
     const dmOnly = String(cfg.dmMode || '').trim() === 'only'
