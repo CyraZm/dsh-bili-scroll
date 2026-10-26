@@ -29,7 +29,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
-import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
+import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
@@ -2091,9 +2091,9 @@ function reportMeta() {
           const cells = t.split('|').map((x) => x.trim()).slice(1, -1)
           const bvIdx = cells.findIndex((x) => /^BV[0-9A-Za-z]{10}$/.test(x))
           const dayRaw = bvIdx > 0 ? cells[bvIdx - 1] : cells[0]
-          const dm = /^(\d{4}-\d{2}-\d{2})/.exec(dayRaw || '')
-          if (bvIdx >= 0 && dm && dm[1] < cutKey) {
-            const month = dm[1].slice(0, 7)
+          const day = seenDay(dayRaw)
+          if (bvIdx >= 0 && day && day < cutKey) {
+            const month = day.slice(0, 7)
             if (!moved.has(month)) moved.set(month, [])
             moved.get(month).push(line)
             continue
@@ -2116,12 +2116,14 @@ function reportMeta() {
       return n
     } catch (e) { log('判重表归档失败（不影响使用）：' + String(e?.message ?? e)); return 0 }
   }
+  let seenBadDays = 0   // 上次解析时认不出日期的行数 ⇒ 变了才记日志（这个函数每次打开设置页都会调）
   const parseSeenTable = () => {
     const file = join(stateDir, 'seen.md')
     let text = ''
     try { text = readFileSync(file, 'utf8') } catch { return [] }
     const out = []
     const seen = new Set()
+    let bad = 0
     // 评论记录表里的 rpid（形如 `| BVxxxx | 317831597441 | ...`）⇒ 这些视频**确实发出去过**
     const deliveredBvs = new Set()
     for (const raw of text.split(/\r?\n/)) {
@@ -2139,10 +2141,9 @@ function reportMeta() {
       if (bvIdx < 0) continue
       const bvid = c[bvIdx]
       const dayRaw = bvIdx > 0 ? c[bvIdx - 1] : c[0]
-      // ⭐ 日期允许带时间：`2026-10-22` / `2026-10-22 18:51` / `2026-10-22T18:51`
-      const dm = /^(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.exec(dayRaw)
-      if (!dm) continue
-      const day = dm[1]
+      // ⭐ 日期允许带时间、允许没写年份：`2026-10-22` / `2026-10-22 18:51` / `10-22`（#133）
+      const day = seenDay(dayRaw)
+      if (!day) { if (bvIdx > 0) bad++; continue }   // BV 在第一列的是「评论记录」表，本来就没有日期列
       const title = c[bvIdx + 1] || ''
       const up = c[bvIdx + 2] || ''
       const status = c[c.length - 1] || ''
@@ -2154,6 +2155,11 @@ function reportMeta() {
       const commented = /评论/.test(status)
       const delivered = /评论|私信|已发|发给/.test(status) || deliveredBvs.has(bvid)
       out.push({ day, bvid, title, up, status, picked, commented, delivered, url: 'https://www.bilibili.com/video/' + bvid })
+    }
+    // ⭐ 以前这里是静默丢行 ⇒ 卡片墙空了也没人知道为什么（#133）
+    if (bad !== seenBadDays) {
+      seenBadDays = bad
+      if (bad) log('判重表有 ' + bad + ' 行日期格式认不出来，「它刷过的视频」里没显示这些行（见 seen.md）')
     }
     out.sort((a, b) => (a.day === b.day ? (a.picked === b.picked ? 0 : a.picked ? -1 : 1) : (a.day < b.day ? 1 : -1)))
     return out
