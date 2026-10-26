@@ -41,6 +41,9 @@
     "dsh": ">=0.1.7-rc.1",
     "node": ">=22"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/schemastery": "*"
