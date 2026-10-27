@@ -240,6 +240,9 @@ function WatchTab() {
       const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
       const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
       const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
+      const [excl, setExcl] = React.useState(null)              // 排除词草稿（一行一个）
+      const [cLen, setCLen] = React.useState(null)              // 评论长度 short/medium/long
+      const [fSort, setFSort] = React.useState(null)            // 关键词搜索排序
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -287,6 +290,9 @@ function WatchTab() {
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
         if (cfg && dmWatch === null) setDmWatch(cfg.dmWatch !== false)   // 2.0 起默认开
         if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
+        if (cfg && excl === null) setExcl((cfg.excludeWords || []).join('\n'))
+        if (cfg && cLen === null) setCLen(cfg.commentLength || 'medium')
+        if (cfg && fSort === null) setFSort(cfg.searchSort || 'pubdate')
       }, [cfg])
 
       // ⭐ 收藏夹列表：只读一次，读不到就空列表（别每 5 秒重拉）
@@ -512,7 +518,8 @@ function WatchTab() {
 
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, personaPrompt: String(persona || '').trim() }, '关键词 / 人设 / 工作区')
+        const list2 = String(excl || '').split('\n').map((s) => s.trim()).filter(Boolean)
+        await patch({ keywords: list, excludeWords: list2, commentLength: String(cLen || 'medium'), searchSort: String(fSort || 'pubdate'), personaPrompt: String(persona || '').trim() }, '关键词 / 人设 / 工作区')
       }
 
       if (!cfg) {
@@ -681,6 +688,22 @@ function WatchTab() {
             'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空 = 刷首页推荐流（像人一样随便逛）',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
           }),
+          h('div', { 'data-bd-label': '' }, '排除词（一行一个）—— 标题 / UP / 简介里出现这些词的，整条跳过'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3, placeholder: '代打代肝\n擦边\n带货',
+            value: excl ?? '', onChange: (e) => setExcl(e.target.value),
+          }),
+          h('div', { 'data-bd-label': '' }, '评论长度'),
+          h('select', { 'data-bd-input': '', value: cLen ?? 'medium', onChange: (e) => setCLen(e.target.value) },
+            h('option', { value: 'short' }, '短（≤15 字）'),
+            h('option', { value: 'medium' }, '中（≤40 字，默认）'),
+            h('option', { value: 'long' }, '长（≤100 字）')),
+          h('div', { 'data-bd-label': '' }, '填了关键词时怎么排序'),
+          h('select', { 'data-bd-input': '', value: fSort ?? 'pubdate', onChange: (e) => setFSort(e.target.value) },
+            h('option', { value: 'pubdate' }, '最新（默认，适合看近几天）'),
+            h('option', { value: 'click' }, '播放最多'),
+            h('option', { value: 'dm' }, '弹幕最多'),
+            h('option', { value: 'totalrank' }, '综合')),
           h('div', { 'data-bd-label': '' }, '它按什么说话（人设提示词）—— 留空也能用：默认口语、短句、必带一个只有看了那条视频才说得出的细节'),
           h('textarea', {
             'data-bd-input': '', rows: 6,
