@@ -2613,9 +2613,10 @@ function reportMeta() {
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'personaPrompt', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid']) {
+      // ⭐⭐ 2026-10-27：白名单直接从 DEFAULTS 推导 —— 以前是手写的固定数组，
+      //    每次加新配置项都容易漏（2.3.0 就漏了 7 个 ⇒ 用户在设置页填的排除词根本存不进来）；
+      //    DEFAULTS 是所有配置项的唯一名单，加一项就自动放行 ✓
+      for (const k of Object.keys(DEFAULTS)) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐⭐ 2.0.4（issue #83）：**服务端空值保护** —— 前端某次自动保存会把空字符串/空数组推上来，
