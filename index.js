@@ -2516,6 +2516,11 @@ function reportMeta() {
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
+      // ⭐ 2.3.0：手动轮是"额外的一次" —— 自动额度只扣自动轮挑的，这儿把两笔账分开亮出来
+      manualExtra: Math.max(0, Number(st.manualExtra || 0)),
+      autoPicked: Math.max(0, countPickedToday() - Math.max(0, Number(st.manualExtra || 0))),
+      autoLeft: Math.max(0, Number(cfg.perDay || 0) - Math.max(0, countPickedToday() - Math.max(0, Number(st.manualExtra || 0)))),
+      lastManualAt: st.lastManualAt || null,
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
       // ⭐ 2.0.4：界面上"它会认谁当主人"那行用这个（用小号登录、大号聊天的会看错）
