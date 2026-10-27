@@ -519,8 +519,13 @@ function WatchTab() {
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
         const list2 = String(excl || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        // ⭐ 排除词被清空时要显式带 clear —— 宿主有"空值不覆盖已有值"的保护，否则永远删不掉
-        await patch({ keywords: list, excludeWords: list2, commentLength: String(cLen || 'medium'), searchSort: String(fSort || 'pubdate'), personaPrompt: String(persona || '').trim(), ...(list2.length ? {} : { clear: ['excludeWords'] }) }, '关键词 / 人设 / 工作区')
+        // ⭐ 被清空的项要显式带 clear —— 宿主有"空值不覆盖已有值"的保护（防自动保存清空人设），
+        //    不带的话用户把关键词/排除词删光了也保存不上，界面还会说"已保存" ✗（2026-10-27 他报的）
+        const clear = []
+        if (!list.length) clear.push('keywords')
+        if (!list2.length) clear.push('excludeWords')
+        if (!String(persona || '').trim().length) clear.push('personaPrompt')
+        await patch({ keywords: list, excludeWords: list2, commentLength: String(cLen || 'medium'), searchSort: String(fSort || 'pubdate'), personaPrompt: String(persona || '').trim(), ...(clear.length ? { clear } : {}) }, '关键词 / 排除词 / 人设')
       }
 
       if (!cfg) {
