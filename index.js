@@ -104,6 +104,10 @@ export const Config = !z ? undefined : z.object({
   replyPerRound: z.number().default(1).extra('volatile', true),
   /** 自动收藏：0 = 不收藏；>0 = 目标收藏夹 fid（设置页下拉选）。动作在宿主侧完成，模型拿不到这只手 */
   favFolderId: z.number().default(0).extra('volatile', true),
+    /** 手动跑一轮最多挑几条（手动是「额外的一次」，不占每天额度） */
+    manualMax: z.natural().default(3).extra('volatile', true),
+    /** 两次手动之间至少隔几分钟（防手滑狂点、防烧 token） */
+    manualCooldownMin: z.natural().default(10).extra('volatile', true),
 })
 
 /**
@@ -1084,7 +1088,7 @@ function reportMeta() {
     } catch (e) { log('查私信 UID 出错：' + String(e?.message ?? e)); return 0 }
   }
 
-  const promptFor = () => {
+  const promptFor = (why = 'auto') => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
     // ⭐ 2026-10-19（issue #36）：这里以前是**在路径字符串上**做 split('<家目录>') —— 空操作 ✗
@@ -1152,8 +1156,12 @@ function reportMeta() {
     } catch { /* 读不到就算了，别因此跑不成 */ }
     // ⭐ 「每天最多挑 N 条」是**全天**的账：上一轮已经挑过的要扣掉，这一轮只给剩下的额度
     const quota = Math.max(0, Number(cfg.perDay) || 0)
-    const already = countPickedToday()
+    const manualExtra = Math.max(0, Number(readJson(dutyStateFile, {}).manualExtra || 0))
+    // ⭐ 2.3.0：手动轮是「额外的一次」——自动额度只扣自动轮挑的（manualExtra 是手动轮多挑的那部分）
+    const already = Math.max(0, countPickedToday() - manualExtra)
     const left = Math.max(0, quota - already)
+    const isManual = why === 'manual'
+    const manualMax = Math.max(1, Number(cfg.manualMax) || 3)
     // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
     const dmUidEff = Number(cfg.dmUid) || dmUidCache
@@ -1191,6 +1199,10 @@ function reportMeta() {
       + (already > 0
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
+        + (isManual
+            ? '\n\n⭐ **这一轮是「手动触发」**：只为"现在就想看一眼"，**不占用今天的自动额度** '
+              + `（自动那边今天还能挑 ${left} 条）。所以只挑 ${manualMax} 条以内、挑完就收，别把全天要看的量一次挑光。`
+            : '')
       // ⭐ 2026-10-24：留空不再用内置关键词（那会让所有用户刷同一批视频、评论区扎堆）
       //    ⇒ 留空 = 用 `bili_recommend` 刷**这个账号的首页推荐流**，按各自画像天然散开 ✓
       + (kws.length
@@ -1550,12 +1562,24 @@ function reportMeta() {
     const overlay = ensureOverlay()
       const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
+    args.push(promptFor(why))
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
     //      它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗；
     //      现在改成"设定由插件读进来、内联进提示词" ✓，cwd 回到插件家 ✓）
+      // ⭐ 2.3.0：手动轮是「额外的一次」，但两次之间要冷却（防手滑狂点 / 防烧 token）
+      if (why === 'manual') {
+        const st0 = readJson(dutyStateFile, {})
+        const last = Number(st0.lastManualAt || 0)
+        const cd = Math.max(0, Number(cfg.manualCooldownMin) || 0) * 60_000
+        if (last && cd > 0 && Date.now() - last < cd) {
+          const wait = Math.ceil((cd - (Date.now() - last)) / 60_000)
+          log(`手动轮刚跑过（${Math.round((Date.now() - last) / 60_000)} 分钟前）⇒ 再等 ${wait} 分钟`)
+          return { ok: false, started: false, error: `手动轮刚跑过，再等 ${wait} 分钟（防手滑狂点）` }
+        }
+        bumpState({ lastManualAt: Date.now() })
+      }
     const cwd = stateDir
     log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
     const child = spawn(dsh.command, args, {
@@ -1605,6 +1629,15 @@ function reportMeta() {
         const prev = st.day === dayKey() ? Number(st.picked || 0) : 0
         const picked = countPickedToday()   // 报告是事实来源、state 只是兜底（跟闸门同一个算法）
         if (picked > prev) { bumpState({ picked }); log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`) }
+          // ⭐ 2.3.0：手动轮挑出来的那部分记进 manualExtra ⇒ 不占自动额度
+          if (why === 'manual') {
+            const delta = Math.max(0, picked - prev)
+            if (delta > 0) {
+              const st2 = readJson(dutyStateFile, {})
+              bumpState({ manualExtra: Math.max(0, Number(st2.manualExtra || 0)) + delta })
+              log(`手动轮额外挑了 ${delta} 条 ⇒ 不占今天的自动额度`)
+            }
+          }
       } catch (e) { log(`数挑了几条时出错（不影响这一轮）：${e?.message ?? e}`) }
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
       //    接口回"发送成功"≠ 公开可见（新号/风控会进审核）；而"不公开"时连 @ 通知都不会推 ⇒
