@@ -108,6 +108,16 @@ export const Config = !z ? undefined : z.object({
     manualMax: z.natural().default(3).extra('volatile', true),
     /** 两次手动之间至少隔几分钟（防手滑狂点、防烧 token） */
     manualCooldownMin: z.natural().default(10).extra('volatile', true),
+    /** 填了关键词时用哪种排序（pubdate=最新 / click=播放 / dm=弹幕 / totalrank=综合） */
+    searchSort: z.string().default('pubdate').extra('volatile', true),
+    /** 关键词搜索翻几页（一页约 20 条，默认 2 页 ≈ 40 条候选） */
+    searchPages: z.natural().default(2).extra('volatile', true),
+    /** 排除词（一行一个）：标题 / UP / 简介里出现就整条跳过（代打、代肝、擦边、带货…） */
+    excludeWords: z.array(z.string()).default([]).extra('volatile', true),
+    /** 评论长度：short ≤15 字 · medium ≤40 字（默认）· long ≤100 字 */
+    commentLength: z.string().default('medium').extra('volatile', true),
+    /** 这一轮最多细看几条（读字幕 / 评论）；其余只扫标题，默认 8 */
+    fetchPerRound: z.natural().default(8).extra('volatile', true),
 })
 
 /**
@@ -1203,10 +1213,20 @@ function reportMeta() {
             ? '\n\n⭐ **这一轮是「手动触发」**：只为"现在就想看一眼"，**不占用今天的自动额度** '
               + `（自动那边今天还能挑 ${left} 条）。所以只挑 ${manualMax} 条以内、挑完就收，别把全天要看的量一次挑光。`
             : '')
+              + (() => {
+                  const ex = (Array.isArray(cfg.excludeWords) ? cfg.excludeWords : []).map((x) => String(x || '').trim()).filter(Boolean)
+                  return ex.length
+                    ? `\n\n⛔ **排除词（先过这一关）**：${ex.join('、')} —— 标题 / UP 名 / 简介里出现这些词的，**整条跳过**（别读字幕、别进报告正文），报告里记一行「排除词跳过 N 条」。`
+                    : ''
+                })()
+              + `\n\n评论长度：${({ short: '短（≤15 字）', medium: '中（≤40 字，默认）', long: '长（≤100 字）' })[cfg.commentLength] || '中（≤40 字，默认）'} —— 超了要自己删到这条线内。`
       // ⭐ 2026-10-24：留空不再用内置关键词（那会让所有用户刷同一批视频、评论区扎堆）
       //    ⇒ 留空 = 用 `bili_recommend` 刷**这个账号的首页推荐流**，按各自画像天然散开 ✓
       + (kws.length
         ? `关键词用这些：${kws.join('、')}（用 bili_search 搜）。`
+        + `排序用 ${cfg.searchSort || 'pubdate'}（pubdate=最新 · click=播放 · dm=弹幕 · totalrank=综合）；`
+        + `翻页：${Math.max(1, Number(cfg.searchPages) || 2)} 页 —— 用 bili_search(page=1..N)，每页扫一眼标题再决定，别只看第一页；`
+        + `这一轮最多**细看** ${Math.max(1, Number(cfg.fetchPerRound) || 8)} 条（读字幕 / 评论都算一次请求），其余的只扫标题，别把候选全读一遍；`
         : '没填关键词 ⇒ **这一轮用 bili_recommend 刷首页推荐流**（不要用 bili_search 搜固定词）。')
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
@@ -2441,6 +2461,13 @@ function reportMeta() {
         }
         {
           const miss = missingVenvDeps()
+          // ⭐ 2.3.0 依赖自检：**用同一个解释器真的 import 一次**（只看目录在不在会骗人）
+          if (code === 0 && existsSync(venvPython())) {
+            const py2 = venvPython()
+            const chk = await spawnLogged(py2, ['-c', 'import bilibili_api, mcp, qrcode; print("imports ok")'])
+            appendInstall(chk === 0 ? '自检：依赖 import 通过\n' : '自检：依赖 import **失败**（上面那段是原因）\n')
+            if (chk !== 0) log('依赖自检没通过：venv 装上了但 import 失败 —— 日志里有原因')
+          }
           appendInstall(`=== 结束（exit ${code}，venvReady=${venvReadyNow()}${miss.length ? '，缺：' + miss.join(' / ') : ''}）===\n`)
           log(`装依赖结束：exit=${code} venvReady=${venvReadyNow()}${miss.length ? ' 缺：' + miss.join(',') : ''}`)
         }

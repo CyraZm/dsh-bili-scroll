@@ -17,6 +17,7 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑥ `bili_cover` / `bili_frames`：封面和画面帧**作为图片**返回（上游没有；
 #         图能不能进模型上下文由宿主判断）
 import asyncio
+import random
 import json
 import re
 import base64
@@ -36,6 +37,13 @@ from bilibili_api.video_uploader import (
 )
 from bilibili_api.utils.picture import Picture
 from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
+
+# 2.3.0 throttle: every read tool sleeps 0.6-1.6s before running
+async def _throttle():
+    try:
+        await asyncio.sleep(random.uniform(0.6, 1.6))
+    except Exception:
+        pass
 
 # ========== 初始化 ==========
 
@@ -385,7 +393,7 @@ async def bili_check_credential() -> str:
 # ========== Tool 1: 搜索视频 ==========
 
 @tool()
-async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> str:
+async def bili_search(keyword: str, num: int = 10, order: str = "totalrank", page: int = 1) -> str:
     """
     搜索B站视频
 
@@ -393,10 +401,12 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
         keyword: 搜索关键词，如"AI Agent"、"大模型教程"
         num: 返回视频数量，默认10，最大50
         order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
+        page: 第几页，从 1 开始（一页约 20 条；想多看一屏就翻页）
     
     Returns:
         JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
     """
+    await _throttle()
     order_map = {
         "totalrank": search.OrderVideo.TOTALRANK,
         "click": search.OrderVideo.CLICK,
@@ -408,7 +418,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
     result = await search.search_by_type(
         keyword=keyword,
         search_type=search.SearchObjectType.VIDEO,
-        page=1,
+        page=max(1, int(page or 1)),
         order_type=order_enum,
     )
 
@@ -424,6 +434,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "review": item.get("review", 0),
             "danmaku": item.get("video_review", 0),
             "duration": item.get("duration", ""),
+            "pubdate": item.get("pubdate", 0),
             "description": item.get("description", "")[:200],
         })
 
@@ -444,6 +455,7 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
     Returns:
         JSON格式的评论列表，包含用户名、评论内容、点赞数、回复数
     """
+    await _throttle()
     cred = get_cred()
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
@@ -515,6 +527,7 @@ async def bili_subtitle(bvid: str) -> str:
     Returns:
         视频的完整字幕文本
     """
+    await _throttle()
     cred = get_cred()
     v = video.Video(bvid=bvid, credential=cred)
 
@@ -1956,6 +1969,7 @@ async def bili_recommend(ps: int = 20) -> str:
     Returns:
         JSON 格式的视频列表，字段与 bili_search 对齐（bvid / title / author / play / danmaku / duration…）
     """
+    await _throttle()
     denied = _guard("bili_recommend")
     if denied:
         return json.dumps({"ok": False, "error": denied}, ensure_ascii=False)
