@@ -2632,7 +2632,7 @@ function reportMeta() {
         const curNotEmpty = cur !== '' && cur !== null && cur !== undefined && !(Array.isArray(cur) && cur.length === 0)
         if (curNotEmpty && !clears.includes(k)) {
           delete patch[k]
-          log('设置：' + k + ' 收到空值，但当前不是空的 ⇒ 已忽略（要清空请用「清空」按钮）')
+          log('设置：' + k + ' 收到空值，但当前不是空的 ⇒ 已忽略（真要清空，请求里要带 clear: ["' + k + '"]）')
         }
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
