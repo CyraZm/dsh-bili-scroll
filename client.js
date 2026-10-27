@@ -702,7 +702,7 @@ function WatchTab() {
           }),
           h('div', { 'data-bd-label': '' }, '排除词（一行一个）—— 标题 / UP / 简介里出现这些词的，整条跳过'),
           h('textarea', {
-            'data-bd-input': '', rows: 3, placeholder: '代打代肝\n擦边\n带货',
+            'data-bd-input': '', rows: 3, placeholder: '一行一个词；留空 = 不过滤',
             value: excl ?? '', onChange: (e) => setExcl(e.target.value),
           }),
           h('div', { 'data-bd-label': '' }, '填了关键词时怎么排序'),
