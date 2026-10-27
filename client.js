@@ -544,7 +544,7 @@ function WatchTab() {
 
         /* ── 今天 ── */
         h('div', { 'data-bd-row': '' },
-          h('span', { 'data-bd-badge': '' }, `自动已挑 ${st.autoPicked ?? st.pickedToday ?? 0} / ${cfg.perDay} 条` + ((st.manualExtra > 0) ? ` · 手动 ${st.manualExtra} 条（不占额度）` : '')),
+          h('span', { 'data-bd-badge': '' }, `自动已挑 ${st.autoPicked ?? st.pickedToday ?? 0} / ${cfg.perDay} 条` + ((st.manualExtra > 0) ? ` · 手动 ${st.manualExtra} 条` : '')),
           h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
           h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
