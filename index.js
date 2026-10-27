@@ -844,7 +844,7 @@ function reportMeta() {
   const bumpState = (patch) => {
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
-    if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {} }
+    if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {}; st.manualExtra = 0 }   // ⭐ 2.3.0：手动轮那笔账也按天归零
     writeJson(dutyStateFile, { ...st, ...patch })
     return st
   }
@@ -884,6 +884,12 @@ function reportMeta() {
       }
     } catch { /* 读不到就按 0 算 */ }
     return Math.max(fromState, countPicks(reportFileOf(now)), fromSeen)
+  }
+  // ⭐ 2.3.0：手动轮是「额外的一次」—— 自动额度只扣自动轮挑的（manualExtra 是手动轮多挑的那部分）
+  const autoPickedToday = (now = new Date()) => {
+    const st = readJson(dutyStateFile, {})
+    const extra = st.day === dayKey(now) ? Math.max(0, Number(st.manualExtra || 0)) : 0
+    return Math.max(0, countPickedToday(now) - extra)
   }
   const roundsToday = (now = new Date()) => {
     const st = readJson(dutyStateFile, {})
@@ -1694,7 +1700,7 @@ function reportMeta() {
       const st = readJson(dutyStateFile, {})
       const today = dayKey(now)
       // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
-      if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
+      if (autoPickedToday(now) >= Number(cfg.perDay || 0)) return
       // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
       if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
       for (const k of ['noon', 'night']) {
@@ -2518,8 +2524,8 @@ function reportMeta() {
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
       // ⭐ 2.3.0：手动轮是"额外的一次" —— 自动额度只扣自动轮挑的，这儿把两笔账分开亮出来
       manualExtra: Math.max(0, Number(st.manualExtra || 0)),
-      autoPicked: Math.max(0, countPickedToday() - Math.max(0, Number(st.manualExtra || 0))),
-      autoLeft: Math.max(0, Number(cfg.perDay || 0) - Math.max(0, countPickedToday() - Math.max(0, Number(st.manualExtra || 0)))),
+      autoPicked: autoPickedToday(),
+      autoLeft: Math.max(0, Number(cfg.perDay || 0) - autoPickedToday()),
       lastManualAt: st.lastManualAt || null,
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
