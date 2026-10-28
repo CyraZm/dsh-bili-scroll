@@ -298,10 +298,15 @@ function WatchTab() {
       }, [cfg])
 
       // ⭐ 收藏夹列表：只读一次，读不到就空列表（别每 5 秒重拉）
+      // ⚠️ 2026-10-28：它要起一个 Python 去问 B站（1~3 秒）⇒ **延迟 1.2 秒再拉**，
+      //    别在打开设置页的第一瞬间跟 /status 抢，否则页面看着像卡住（他报"退出再进会卡一段"）
       React.useEffect(() => {
         if (favFolders !== null) return
-        jget('/fav-folders').then((r) => { if (alive.current) setFavFolders(r && r.ok ? (r.folders || []) : []) })
-          .catch(() => { if (alive.current) setFavFolders([]) })
+        const t = setTimeout(() => {
+          jget('/fav-folders').then((r) => { if (alive.current) setFavFolders(r && r.ok ? (r.folders || []) : []) })
+            .catch(() => { if (alive.current) setFavFolders([]) })
+        }, 1200)
+        return () => clearTimeout(t)
       }, [favFolders])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
