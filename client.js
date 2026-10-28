@@ -245,6 +245,7 @@ function WatchTab() {
       const [fSort, setFSort] = React.useState(null)            // 关键词搜索排序
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
+      const [optim, setOptim] = React.useState({})   // 乐观更新：点下去先变，成功再以服务端为准
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
@@ -310,7 +311,7 @@ function WatchTab() {
       }
 
       const patch = async (p, what) => {
-        setBusy(JSON.stringify(p))
+        setOptim((old) => ({ ...old, ...p }))          // 先亮起来
         try {
           const r = await jpost('/config', p)
           if (r?.config) setSt((old) => ({ ...old, config: r.config }))
@@ -318,7 +319,8 @@ function WatchTab() {
           if (r?.host && r.host.ok === false) say(`${what || '设置'}：插件自己那份存了，但 DSH 设置页那份没写进去（${r.host.error}）`, 'warn')
           else say(what ? `${what}：已保存` : '已保存', 'good')
         } catch (e) { say(String(e?.message ?? e), 'warn') }
-        finally { setBusy('') }
+        // 不管成功失败都清掉乐观值：成功时以服务端返回为准，失败时自动回到原样
+        finally { setOptim({}); setBusy('') }
       }
 
       // 「它刷过的视频」：点开才读，读一次就留着（不会每 5 秒重拉）
@@ -538,7 +540,8 @@ function WatchTab() {
             '%USERPROFILE%\\.dsh\\bili-duty\\duty.log 的最后几十行发给作者。') : null)
       }
 
-      const sw = (k) => Boolean(cfg[k])
+      // 点了先变，别等网络回来（宿主写 DSH 设置那一步可能要几百毫秒）
+      const sw = (k) => Boolean(k in optim ? optim[k] : cfg[k])
 
       return h('div', { 'data-bd-page': '' },
 
