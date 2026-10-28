@@ -181,6 +181,15 @@ export function apply(ctx, config) {
   const VENV_DEPS = ['bilibili_api', 'mcp', 'qrcode']
   const missingVenvDeps = () => VENV_DEPS.filter((n) => !hasPkg(join(stateDir, '.venv'), n))
   const venvReadyNow = () => existsSync(venvPython()) && missingVenvDeps().length === 0
+  // ⭐ 2026-10-28：/status 每 5 秒被拉一次，每次都去扫 site-packages 太浪费 ⇒ 探一次缓存 30 秒
+  let venvProbe = { at: 0, ready: false, missing: [] }
+  const venvProbeNow = () => {
+    const now = Date.now()
+    if (now - venvProbe.at < 30_000) return venvProbe
+    const missing = missingVenvDeps()
+    venvProbe = { at: now, ready: existsSync(venvPython()) && missing.length === 0, missing }
+    return venvProbe
+  }
   const asrReadyNow = () => existsSync(asrPython()) && hasPkg(asrDir, 'faster_whisper')
   const cfgFile = join(stateDir, 'config.json')
   /**
@@ -2513,6 +2522,9 @@ function reportMeta() {
   const status = () => {
     refreshCfg()
     const st = readJson(dutyStateFile, {})
+    // ⭐ 2026-10-28：原来 pickedToday / autoPicked / autoLeft 各调一次 countPickedToday（每次要读报告+解析）⇒ 只算一次
+    const pickedTodayCount = countPickedToday()
+    const manualExtraCount = Math.max(0, Number(st.manualExtra || 0))
     const today = dayKey()
     return {
       ok: true,
@@ -2521,21 +2533,21 @@ function reportMeta() {
       windows: WINDOWS,
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
-      pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
+      pickedToday: pickedTodayCount,
       // ⭐ 2.3.0：手动轮是"额外的一次" —— 自动额度只扣自动轮挑的，这儿把两笔账分开亮出来
       manualExtra: Math.max(0, Number(st.manualExtra || 0)),
-      autoPicked: autoPickedToday(),
-      autoLeft: Math.max(0, Number(cfg.perDay || 0) - autoPickedToday()),
+      autoPicked: Math.max(0, pickedTodayCount - manualExtraCount),
+      autoLeft: Math.max(0, Number(cfg.perDay || 0) - (pickedTodayCount - manualExtraCount)),
       lastManualAt: st.lastManualAt || null,
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
       // ⭐ 2.0.4：界面上"它会认谁当主人"那行用这个（用小号登录、大号聊天的会看错）
       ownerInfo: ownerInfo(),
       loggedIn: hasCredential(),
-      venvReady: venvReadyNow(),
+      venvReady: venvProbeNow().ready,
       version: myVersion(),
       // 2026-10-22：缺哪个 Python 包装不上，得能一眼看出来（出不了二维码 =09 缺 qrcode）
-      missingDeps: (() => { try { return missingVenvDeps() } catch { return [] } })(),
+      missingDeps: venvProbeNow().missing,
       dmUidResolved: Number(cfg.dmUid) || dmUidCache || 0,
       // ⭐ 人设：老用户（只填过工作区）可以一键导入他那份 AGENTS.md
       personaFromWs: (() => {
