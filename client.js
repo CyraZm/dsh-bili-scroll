@@ -318,6 +318,9 @@ function WatchTab() {
 
       const patch = async (p, what) => {
         setOptim((old) => ({ ...old, ...p }))          // 先亮起来
+        // ⭐ 2026-10-28：宿主每次保存都要顺手同步进 DSH 原生设置，几百毫秒回不来 ⇒
+        //    先给一句「保存中…」，不然点下去到出结果之间是一片空白（他报「以前马上就出来，现在要等一会」）
+        say(`${what || '设置'}：保存中…`, '')
         try {
           const r = await jpost('/config', p)
           if (r?.config) setSt((old) => ({ ...old, config: r.config }))
