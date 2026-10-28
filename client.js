@@ -80,6 +80,7 @@ window.__ModuleLoader__.load({
 [data-bd-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;word-break:break-all;
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-msg][data-warn]{color:#f59e0b;}
+[data-bd-msgbar]{position:sticky;top:0;z-index:6;background:var(--dsw-alias-bg-base,#151a24);box-shadow:0 1px 0 var(--dsw-alias-bg-layer-2,#2a3140);margin-bottom:4px;}
 [data-bd-msg][data-good]{color:#22c55e;}
 [data-bd-qr]{display:flex;gap:14px;align-items:flex-start;}
 [data-bd-qr] img{width:150px;height:150px;border-radius:8px;background:#fff;padding:6px;}
@@ -532,6 +533,8 @@ function WatchTab() {
 
       if (!cfg) {
         return h('div', { 'data-bd-page': '' },
+        // ⭐ 2026-10-28：提示改成吸顶固定在最上面 —— 以前它挨着「保存」，往下滚到某个开关就看不见了（他报「绿字没了」）
+        msg ? h('div', { 'data-bd-msg': '', 'data-bd-msgbar': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null,
           h('div', { 'data-bd-note': '' }, fails >= 3
             ? '读不到插件配置（已经试了 ' + fails + ' 次）。常见原因有三个：装的还是 0.1.11 / 0.1.12（那两版有 bug，会卡在这里）；刚装完没重启 dsh；或者插件加载失败。'
             : '读设置中…'),
@@ -563,8 +566,7 @@ function WatchTab() {
             h('button', { key: v, 'data-bd-tab': '', 'aria-selected': tab === v ? 'true' : 'false', onClick: () => setTab(v) }, label))),
 
         h('div', { 'data-bd-row': '' },
-          h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
-          msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null),
+          h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存')),
 
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
